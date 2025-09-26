@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Fantasy Sim — Draft & Optimize</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-slate-950 text-slate-100">
+  <!-- API config panel -->
+  <div class="fixed top-3 right-3 text-xs">
+    <button id="cfgBtn" class="px-2 py-1 rounded bg-slate-800 border border-slate-700">⚙️ API</button>
+    <div id="cfgPanel" class="hidden mt-2 p-3 rounded bg-slate-900 border border-slate-700">
+      <div class="mb-2 font-semibold">Backend URL</div>
+      <input id="apiInput" class="w-64 bg-slate-800 rounded px-2 py-1 border border-slate-700"
+             placeholder="https://your-backend.onrender.com" />
+      <button id="saveApi" class="ml-2 px-2 py-1 rounded bg-green-500 text-black font-semibold">Save</button>
+    </div>
+  </div>
+
+  <div class="max-w-6xl mx-auto p-6">
+    <header class="flex items-center justify-between">
+      <h1 class="text-2xl font-bold">Fantasy Sim</h1>
+      <a id="healthLink" href="#" class="text-xs underline">API Health</a>
+    </header>
+
+    <main class="grid md:grid-cols-3 gap-6 mt-6">
+      <section class="md:col-span-2 bg-slate-900/60 rounded-2xl p-4 border border-slate-800">
+        <h2 class="text-lg font-semibold mb-3">Players</h2>
+        <div id="players" class="grid grid-cols-2 md:grid-cols-3 gap-3"></div>
+      </section>
+
+      <aside class="bg-slate-900/60 rounded-2xl p-4 border border-slate-800">
+        <h2 class="text-lg font-semibold mb-3">Optimizer</h2>
+        <div class="space-y-3">
+          <label class="block text-sm">Salary Cap
+            <input id="cap" type="number" class="mt-1 w-full bg-slate-800 rounded px-3 py-2" value="50000">
+          </label>
+          <button id="optBtn" class="w-full py-2 rounded-xl bg-green-500 text-black font-semibold hover:opacity-90">
+            Run Optimizer
+          </button>
+        </div>
+        <div id="result" class="mt-4 text-sm"></div>
+      </aside>
+    </main>
+  </div>
+
+  <script>
+    // --- API base handling (saved to localStorage)
+    function api(path){
+      const base=(localStorage.getItem('API_BASE')||'').trim();
+      if(!base) return path; // same-origin (local dev)
+      if(path.startsWith('/')) return base+path;
+      return base+'/'+path;
+    }
+
+    // Config UI
+    const cfgBtn=document.getElementById('cfgBtn');
+    const cfgPanel=document.getElementById('cfgPanel');
+    const apiInput=document.getElementById('apiInput');
+    const saveApi=document.getElementById('saveApi');
+    const healthLink=document.getElementById('healthLink');
+
+    apiInput.value = localStorage.getItem('API_BASE') || '';
+    cfgBtn.onclick = ()=> cfgPanel.classList.toggle('hidden');
+    saveApi.onclick = ()=>{
+      const val=(apiInput.value||'').trim().replace(/\/+$/,'');
+      if(val) localStorage.setItem('API_BASE',val); else localStorage.removeItem('API_BASE');
+      alert('Saved! Refreshing…'); location.reload();
+    };
+    healthLink.onclick = (e)=>{
+      e.preventDefault();
+      const url = api('/api/health'); window.open(url,'_blank');
+    };
+
+    // App logic
+    const playersDiv=document.getElementById('players');
+    const resultDiv=document.getElementById('result');
+    const capInput=document.getElementById('cap');
+
+    async function loadPlayers(){
+      const res=await fetch(api('/api/players'));
+      const data=await res.json();
+      const players=data.players||data;
+      playersDiv.innerHTML=players.map(p=>`
+        <div class="p-3 rounded-xl bg-slate-800 border border-slate-700">
+          <div class="font-semibold">${p.name}</div>
+          <div class="text-xs text-slate-300">${p.team} · ${p.pos}</div>
+          <div class="mt-2 text-sm">💰 ${p.salary.toLocaleString()} · 📈 ${p.proj}</div>
+        </div>
+      `).join('');
+    }
+
+    async function optimize(){
+      const constraints={
+        salaryCap:Number(capInput.value||50000),
+        roster:{QB:1,RB:2,WR:3,TE:1,FLEX:1,DST:1},
+        allowFlexFrom:["RB","WR","TE"]
+      };
+      const res=await fetch(api('/api/lineups/optimize'),{
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({constraints})
+      });
+      const data=await res.json();
+      resultDiv.innerHTML=`
+        <div class="p-3 rounded-xl bg-slate-800 border border-slate-700">
+          <div class="font-semibold mb-2">Lineup · Proj ${data.totalProj} · \$${data.usedSalary?.toLocaleString?.() ?? 0} / \$${data.salaryCap?.toLocaleString?.() ?? 0}</div>
+          <ul class="space-y-1">
+            ${(data.lineup||[]).map(p=>`<li>• ${p.pos} ${p.name} (${p.team}) — \$${p.salary} · ${p.proj}</li>`).join('')}
+          </ul>
+        </div>
+      `;
+    }
+
+    document.getElementById('optBtn').addEventListener('click', optimize);
+    loadPlayers();
+  </script>
+</body>
+</html>
