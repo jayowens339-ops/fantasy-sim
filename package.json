@@ -1,0 +1,1 @@
+{"name":"fantasy-sim","private":true,"workspaces":["backend","frontend","packages/*"],"scripts":{"dev":"npm run dev -w backend","start":"npm start -w backend"}}
