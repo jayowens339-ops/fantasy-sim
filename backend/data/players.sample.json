@@ -2,7 +2,7 @@
   {"id":"QB1","name":"J. Elite","team":"NE","pos":"QB","salary":7200,"proj":22.5},
   {"id":"QB2","name":"K. Gunslinger","team":"KC","pos":"QB","salary":7600,"proj":23.1},
   {"id":"RB1","name":"R. Thunder","team":"SF","pos":"RB","salary":6900,"proj":18.0},
-  {"id":"RB2","name":"B. Workhorse","team":"DAL","pos":"RB","salary":6800,"proj":16.9},
+  {"id":"RB2","name":"B. Workhorse","team":"DAL","pos":"RB","salary":6800","proj":16.9},
   {"id":"RB3","name":"S. ValueBack","team":"CHI","pos":"RB","salary":5200,"proj":14.2},
   {"id":"WR1","name":"W. Alpha","team":"MIN","pos":"WR","salary":8200,"proj":21.0},
   {"id":"WR2","name":"C. DeepThreat","team":"MIA","pos":"WR","salary":7000,"proj":17.2},
