@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Fantasy Sim — Draft & Optimize</title>
+  <title>Fantasy Sim — Multi-Lineup Optimizer</title>
   <script src="https://cdn.tailwindcss.com"></script>
 </head>
 <body class="bg-slate-950 text-slate-100">
@@ -12,7 +12,7 @@
     <button id="cfgBtn" class="px-2 py-1 rounded bg-slate-800 border border-slate-700">⚙️ API</button>
     <div id="cfgPanel" class="hidden mt-2 p-3 rounded bg-slate-900 border border-slate-700 shadow-xl space-y-2">
       <div class="font-semibold">Backend URL</div>
-      <input id="apiInput" class="w-72 bg-slate-800 rounded px-2 py-1 border border-slate-700"
+      <input id="apiInput" class="w-80 bg-slate-800 rounded px-2 py-1 border border-slate-700"
              placeholder="https://your-backend.onrender.com" />
       <div class="flex gap-2">
         <button id="saveApi"  class="px-2 py-1 rounded bg-green-500 text-black font-semibold">Save</button>
@@ -24,17 +24,23 @@
     </div>
   </div>
 
-  <div class="max-w-6xl mx-auto p-6">
+  <div class="max-w-7xl mx-auto p-6">
     <header class="flex items-center justify-between">
       <h1 class="text-2xl font-bold">Fantasy Sim</h1>
-      <a id="healthLink" href="#" class="text-xs underline">API Health</a>
+      <nav class="flex items-center gap-4 text-xs">
+        <a id="healthLink" href="#" class="underline">API Health</a>
+        <button id="refreshBtn" class="px-2 py-1 rounded bg-slate-800 border border-slate-700">↻ Reload Players</button>
+      </nav>
     </header>
 
-    <main class="grid md:grid-cols-3 gap-6 mt-6">
+    <main class="grid lg:grid-cols-3 gap-6 mt-6">
       <!-- Players -->
-      <section class="md:col-span-2 bg-slate-900/60 rounded-2xl p-4 border border-slate-800">
-        <h2 class="text-lg font-semibold mb-3">Players</h2>
-        <div id="players" class="grid grid-cols-2 md:grid-cols-3 gap-3"></div>
+      <section class="lg:col-span-2 bg-slate-900/60 rounded-2xl p-4 border border-slate-800">
+        <div class="flex items-center justify-between mb-3">
+          <h2 class="text-lg font-semibold">Players</h2>
+          <div id="playersCount" class="text-xs text-slate-300"></div>
+        </div>
+        <div id="players" class="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-3"></div>
         <div id="playersMsg" class="text-slate-300 text-sm mt-3"></div>
       </section>
 
@@ -45,13 +51,34 @@
           <label class="block text-sm">Salary Cap
             <input id="cap" type="number" class="mt-1 w-full bg-slate-800 rounded px-3 py-2" value="50000">
           </label>
-          <button id="optBtn" class="w-full py-2 rounded-xl bg-green-500 text-black font-semibold hover:opacity-90">
-            Run Optimizer
-          </button>
+          <label class="block text-sm"># of Lineups
+            <input id="count" type="number" class="mt-1 w-full bg-slate-800 rounded px-3 py-2" value="20" min="1" max="150">
+          </label>
+          <label class="block text-sm">Noise (diversification)
+            <input id="noise" type="range" min="0" max="2" step="0.05" value="1.2" class="w-full">
+            <div class="text-xs text-slate-300 mt-1">Higher noise ⇒ more variety (0 = deterministic)</div>
+          </label>
+          <div class="grid grid-cols-2 gap-2">
+            <button id="optBtn" class="py-2 rounded-xl bg-green-500 text-black font-semibold hover:opacity-90">
+              Generate
+            </button>
+            <button id="csvBtn" class="py-2 rounded-xl bg-slate-800 border border-slate-700 hover:bg-slate-700">
+              Export CSV
+            </button>
+          </div>
         </div>
-        <div id="result" class="mt-4 text-sm"></div>
+        <div id="optMsg" class="text-slate-300 text-sm mt-3"></div>
       </aside>
     </main>
+
+    <!-- Results -->
+    <section class="mt-6">
+      <div class="flex items-center justify-between mb-3">
+        <h2 class="text-lg font-semibold">Lineups</h2>
+        <div id="lineupMeta" class="text-xs text-slate-300"></div>
+      </div>
+      <div id="lineups" class="grid md:grid-cols-2 xl:grid-cols-3 gap-4"></div>
+    </section>
   </div>
 
   <script>
@@ -59,46 +86,78 @@
     function getApiBase(){ return (localStorage.getItem('API_BASE')||'').trim(); }
     function api(path){
       const base=getApiBase();
-      if(!base) return path;                     // same-origin (local dev)
+      if(!base) return path; // same-origin (local dev)
       return path.startsWith('/') ? base+path : base+'/'+path;
     }
 
-    /* ---------- UI wiring ---------- */
-    const cfgBtn    = document.getElementById('cfgBtn');
-    const cfgPanel  = document.getElementById('cfgPanel');
-    const apiInput  = document.getElementById('apiInput');
-    const saveApi   = document.getElementById('saveApi');
-    const clearApi  = document.getElementById('clearApi');
-    const playersEl = document.getElementById('players');
-    const playersMsg= document.getElementById('playersMsg');
-    const resultEl  = document.getElementById('result');
-    const capInput  = document.getElementById('cap');
-    const healthLink= document.getElementById('healthLink');
+    /* ---------- Elements ---------- */
+    const cfgBtn = document.getElementById('cfgBtn');
+    const cfgPanel = document.getElementById('cfgPanel');
+    const apiInput = document.getElementById('apiInput');
+    const saveApi = document.getElementById('saveApi');
+    const clearApi = document.getElementById('clearApi');
 
+    const playersEl = document.getElementById('players');
+    const playersMsg = document.getElementById('playersMsg');
+    const playersCount = document.getElementById('playersCount');
+
+    const capInput = document.getElementById('cap');
+    const countInput = document.getElementById('count');
+    const noiseInput = document.getElementById('noise');
+    const optBtn = document.getElementById('optBtn');
+    const optMsg = document.getElementById('optMsg');
+
+    const healthLink = document.getElementById('healthLink');
+    const refreshBtn = document.getElementById('refreshBtn');
+
+    const lineupMeta = document.getElementById('lineupMeta');
+    const lineupsEl = document.getElementById('lineups');
+    const csvBtn = document.getElementById('csvBtn');
+
+    /* ---------- UI wiring ---------- */
     apiInput.value = getApiBase();
     cfgBtn.onclick  = () => cfgPanel.classList.toggle('hidden');
     saveApi.onclick = () => {
       const v=(apiInput.value||'').trim().replace(/\/+$/,'');
-      if(v) localStorage.setItem('API_BASE', v);
-      else  localStorage.removeItem('API_BASE');
+      if(v) localStorage.setItem('API_BASE', v); else localStorage.removeItem('API_BASE');
       alert('Saved! Refreshing…'); location.reload();
     };
     clearApi.onclick = () => { localStorage.removeItem('API_BASE'); alert('Cleared. Refreshing…'); location.reload(); };
-    healthLink.onclick = (e) => { e.preventDefault(); window.open(api('/api/health'), '_blank'); };
+
+    healthLink.onclick = (e)=>{ e.preventDefault(); window.open(api('/api/health'), '_blank'); };
+    refreshBtn.onclick = async ()=>{
+      playersMsg.textContent = 'Refreshing…';
+      try{
+        const res = await fetch(api('/api/admin/refresh'), { method:'POST', headers:{ 'x-admin-token': 'Truetrenddfs4u!' }});
+        playersMsg.textContent = res.ok ? 'Refreshed data. Loading players…' : 'Refresh failed.';
+        await loadPlayers();
+      }catch(e){ playersMsg.textContent = 'Refresh failed: '+e.message; }
+    };
+
+    /* ---------- Helpers ---------- */
+    function fmtMoney(x){ return '$' + Number(x||0).toLocaleString(); }
+    function download(filename, text){
+      const a = document.createElement('a');
+      a.setAttribute('href', 'data:text/plain;charset=utf-8,' + encodeURIComponent(text));
+      a.setAttribute('download', filename);
+      a.style.display = 'none';
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    }
 
     /* ---------- Load Players ---------- */
     async function loadPlayers(){
       playersMsg.textContent = 'Loading players…';
       playersEl.innerHTML = '';
       try{
-        const res = await fetch(api('/api/players'), { cache:'no-store' });
+        const res = await fetch(api('/api/players'), { cache: 'no-store' });
         const raw = await res.text();
         if(!res.ok) throw new Error(`HTTP ${res.status} ${raw.slice(0,120)}`);
-        let data; try{ data = JSON.parse(raw); }catch{ throw new Error('Bad JSON: '+raw.slice(0,120)); }
+        let data; try{ data = JSON.parse(raw); } catch { throw new Error('Bad JSON: '+raw.slice(0,120)); }
         const list = Array.isArray(data) ? data : (data.players || []);
-        if(!list.length){ playersMsg.textContent='Backend returned 0 players.'; return; }
-        playersMsg.textContent='';
-        playersEl.innerHTML = list.map(p => `
+        playersCount.textContent = `${list.length.toLocaleString()} players`;
+        if(!list.length){ playersMsg.textContent = 'Backend returned 0 players.'; return; }
+        playersMsg.textContent = '';
+        playersEl.innerHTML = list.slice(0,200).map(p => `
           <div class="p-3 rounded-xl bg-slate-800 border border-slate-700">
             <div class="font-semibold truncate">${p.name}</div>
             <div class="text-xs text-slate-300">${p.team ?? ''} · ${p.pos ?? ''}</div>
@@ -111,42 +170,88 @@
       }
     }
 
-    /* ---------- Optimize ---------- */
-    async function optimize(){
-      resultEl.innerHTML = '<div class="text-slate-300">Optimizing…</div>';
-      const body = { constraints: { salaryCap: Number(capInput.value||50000) } };
+    /* ---------- Optimize (multi) ---------- */
+    function renderSingleLineupCard(obj, idx){
+      const used = obj.usedSalary ?? 0;
+      const proj = obj.totalProj ?? 0;
+      const lineup = obj.lineup || [];
+      const rows = lineup.map(p => `<li>• ${p.pos} ${p.name} (${p.team}) — ${fmtMoney(p.salary)} · ${p.proj}</li>`).join('');
+      return `
+        <div class="rounded-2xl bg-slate-900/60 border border-slate-800 p-3">
+          <div class="flex items-center justify-between mb-2">
+            <div class="font-semibold">Lineup ${idx+1}</div>
+            <div class="text-xs text-slate-300">${fmtMoney(used)} · Proj ${proj}</div>
+          </div>
+          <ul class="text-sm space-y-1">${rows}</ul>
+        </div>
+      `;
+    }
 
+    function toCSV(lineups){
+      const header = ['lineup','slot','pos','name','team','salary','proj'].join(',');
+      const lines = [header];
+      lineups.forEach((L, i)=>{
+        (L.lineup||[]).forEach((p, j)=>{
+          lines.push([i+1, j+1, p.pos, `"${p.name}"`, p.team, p.salary, p.proj].join(','));
+        });
+      });
+      return lines.join('\n');
+    }
+
+    async function optimize(){
+      lineupsEl.innerHTML = '';
+      lineupMeta.textContent = '';
+      optMsg.textContent = 'Optimizing…';
+
+      const salaryCap = Number(capInput.value || 50000);
+      const count = Math.max(1, Math.min(150, Number(countInput.value || 1)));
+      const noise = Number(noiseInput.value || 1.2);
+
+      // Preferred multi-lineup endpoint
       async function postJson(url, payload){
-        const r = await fetch(url, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload) });
+        const r = await fetch(url, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) });
         const t = await r.text(); let j;
-        try{ j = JSON.parse(t); }catch{ throw new Error(`Bad JSON from ${url}: ${t.slice(0,120)}`); }
-        if(!r.ok) throw new Error(`${url} → HTTP ${r.status}: ${t.slice(0,120)}`);
+        try{ j = JSON.parse(t); }catch{ throw new Error(`Bad JSON from ${url}: ${t.slice(0,160)}`); }
+        if (!r.ok) throw new Error(`${url} → HTTP ${r.status}: ${t.slice(0,160)}`);
         return j;
       }
 
       try{
-        let data;
-        try { data = await postJson(api('/api/lineups/optimize'), body); }
-        catch { data = await postJson(api('/api/optimize'), { salaryCap: body.constraints.salaryCap }); }
+        let result;
+        // If count > 1, ask backend for multiple
+        if (count > 1) {
+          result = await postJson(api('/api/lineups/optimize'), {
+            constraints: { salaryCap, numLineups: count, noise }
+          });
+          const lineups = result.lineups || [];
+          lineupMeta.textContent = `Generated ${lineups.length} lineups · Salary Cap ${fmtMoney(result.salaryCap ?? salaryCap)}`;
+          if (!lineups.length) throw new Error('No lineups returned.');
+          lineupsEl.innerHTML = lineups.map((L, i) => renderSingleLineupCard(L, i)).join('');
+          // Hook CSV export
+          csvBtn.onclick = ()=> download(`lineups_${lineups.length}.csv`, toCSV(lineups));
+        } else {
+          // Single lineup path (works with both endpoints)
+          try {
+            result = await postJson(api('/api/lineups/optimize'), { constraints: { salaryCap, numLineups: 1, noise }});
+          } catch {
+            result = await postJson(api('/api/optimize'), { salaryCap });
+          }
+          lineupMeta.textContent = `Generated 1 lineup · Salary Cap ${fmtMoney(salaryCap)}`;
+          lineupsEl.innerHTML = renderSingleLineupCard(result, 0);
+          csvBtn.onclick = ()=> download('lineups_1.csv', toCSV([{ lineup: result.lineup, totalProj: result.totalProj, usedSalary: result.usedSalary }]));
+        }
 
-        const lineup = data.lineup || [];
-        const proj   = data.totalProj ?? data.projTotal ?? 0;
-        const used   = data.usedSalary ?? 0;
-
-        resultEl.innerHTML = `
-          <div class="p-3 rounded-xl bg-slate-800 border border-slate-700">
-            <div class="font-semibold mb-2">Lineup · Proj ${proj} · $${used.toLocaleString()} / $${body.constraints.salaryCap.toLocaleString()}</div>
-            <ul class="space-y-1">
-              ${lineup.map(p => `<li>• ${p.pos} ${p.name} (${p.team}) — $${p.salary} · ${p.proj}</li>`).join('')}
-            </ul>
-          </div>`;
+        optMsg.textContent = 'Done.';
       }catch(err){
-        resultEl.innerHTML = `<div class="text-red-300">Optimize failed: ${err.message}</div>`;
+        optMsg.textContent = 'Optimize failed: '+err.message;
         console.error('[Optimize]', err);
       }
     }
 
-    document.getElementById('optBtn').addEventListener('click', optimize);
+    optBtn.addEventListener('click', optimize);
+    csvBtn.addEventListener('click', ()=>alert('Generate lineups first, then export CSV.'));
+
+    // Boot
     loadPlayers();
   </script>
 </body>
