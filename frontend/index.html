@@ -7,15 +7,27 @@
   <script src="https://cdn.tailwindcss.com"></script>
 </head>
 <body class="bg-slate-950 text-slate-100">
-  <!-- API config panel -->
+  <!-- API config -->
   <div class="fixed top-3 right-3 text-xs">
     <button id="cfgBtn" class="px-2 py-1 rounded bg-slate-800 border border-slate-700">⚙️ API</button>
     <div id="cfgPanel" class="hidden mt-2 p-3 rounded bg-slate-900 border border-slate-700">
       <div class="mb-2 font-semibold">Backend URL</div>
-      <input id="apiInput" class="w-64 bg-slate-800 rounded px-2 py-1 border border-slate-700"
-             placeholder="https://your-backend.onrender.com" />
+      <input id="apiInput" class="w-64 bg-slate-800 rounded px-2 py-1 border border-slate-700" placeholder="https://your-backend.onrender.com" />
       <button id="saveApi" class="ml-2 px-2 py-1 rounded bg-green-500 text-black font-semibold">Save</button>
     </div>
+  </div>
+
+  <!-- Admin data loader -->
+  <div class="fixed top-14 right-3 text-xs bg-slate-900/80 border border-slate-700 rounded p-3 space-y-2">
+    <div class="font-semibold">Admin Data Loader</div>
+    <input id="admToken" class="w-64 bg-slate-800 rounded px-2 py-1 border border-slate-700" placeholder="Admin Token">
+    <input id="csvUrl" class="w-64 bg-slate-800 rounded px-2 py-1 border border-slate-700" placeholder="CSV URL (optional)">
+    <div class="flex gap-2 items-center">
+      <input id="csvFile" type="file" accept=".csv" class="text-slate-300">
+      <button id="btnUpload" class="px-2 py-1 rounded bg-blue-500 text-black font-semibold">Upload CSV</button>
+    </div>
+    <button id="btnFetch" class="px-2 py-1 rounded bg-amber-400 text-black font-semibold w-full">Fetch From URL</button>
+    <div id="admMsg" class="text-slate-300"></div>
   </div>
 
   <div class="max-w-6xl mx-auto p-6">
@@ -46,72 +58,70 @@
   </div>
 
   <script>
-    // --- API base handling (saved to localStorage)
     function api(path){
       const base=(localStorage.getItem('API_BASE')||'').trim();
-      if(!base) return path; // same-origin (local dev)
-      if(path.startsWith('/')) return base+path;
-      return base+'/'+path;
+      if(!base) return path;
+      return path.startsWith('/') ? base+path : base+'/'+path;
     }
-
-    // Config UI
-    const cfgBtn=document.getElementById('cfgBtn');
-    const cfgPanel=document.getElementById('cfgPanel');
-    const apiInput=document.getElementById('apiInput');
-    const saveApi=document.getElementById('saveApi');
-    const healthLink=document.getElementById('healthLink');
+    // UI wiring
+    const cfgBtn=document.getElementById('cfgBtn'), cfgPanel=document.getElementById('cfgPanel');
+    const apiInput=document.getElementById('apiInput'), saveApi=document.getElementById('saveApi');
+    const playersDiv=document.getElementById('players'), resultDiv=document.getElementById('result');
+    const capInput=document.getElementById('cap'), healthLink=document.getElementById('healthLink');
 
     apiInput.value = localStorage.getItem('API_BASE') || '';
     cfgBtn.onclick = ()=> cfgPanel.classList.toggle('hidden');
-    saveApi.onclick = ()=>{
-      const val=(apiInput.value||'').trim().replace(/\/+$/,'');
-      if(val) localStorage.setItem('API_BASE',val); else localStorage.removeItem('API_BASE');
-      alert('Saved! Refreshing…'); location.reload();
-    };
-    healthLink.onclick = (e)=>{
-      e.preventDefault();
-      const url = api('/api/health'); window.open(url,'_blank');
-    };
-
-    // App logic
-    const playersDiv=document.getElementById('players');
-    const resultDiv=document.getElementById('result');
-    const capInput=document.getElementById('cap');
+    saveApi.onclick = ()=>{ const v=(apiInput.value||'').trim().replace(/\/+$/,''); if(v) localStorage.setItem('API_BASE',v); else localStorage.removeItem('API_BASE'); alert('Saved! Refreshing…'); location.reload(); };
+    healthLink.onclick = (e)=>{ e.preventDefault(); window.open(api('/api/health'),'_blank'); };
 
     async function loadPlayers(){
       const res=await fetch(api('/api/players'));
       const data=await res.json();
-      const players=data.players||data;
+      const players=data.players||[];
       playersDiv.innerHTML=players.map(p=>`
         <div class="p-3 rounded-xl bg-slate-800 border border-slate-700">
           <div class="font-semibold">${p.name}</div>
           <div class="text-xs text-slate-300">${p.team} · ${p.pos}</div>
-          <div class="mt-2 text-sm">💰 ${p.salary.toLocaleString()} · 📈 ${p.proj}</div>
+          <div class="mt-2 text-sm">💰 ${p.salary.toLocaleString?.() ?? p.salary} · 📈 ${p.proj ?? 0}</div>
         </div>
       `).join('');
     }
 
     async function optimize(){
-      const constraints={
-        salaryCap:Number(capInput.value||50000),
-        roster:{QB:1,RB:2,WR:3,TE:1,FLEX:1,DST:1},
-        allowFlexFrom:["RB","WR","TE"]
-      };
-      const res=await fetch(api('/api/lineups/optimize'),{
-        method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({constraints})
-      });
+      const constraints={ salaryCap:Number(capInput.value||50000), roster:{QB:1,RB:2,WR:3,TE:1,FLEX:1,DST:1}, allowFlexFrom:["RB","WR","TE"] };
+      const res=await fetch(api('/api/lineups/optimize'),{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({constraints})});
       const data=await res.json();
       resultDiv.innerHTML=`
         <div class="p-3 rounded-xl bg-slate-800 border border-slate-700">
-          <div class="font-semibold mb-2">Lineup · Proj ${data.totalProj} · \$${data.usedSalary?.toLocaleString?.() ?? 0} / \$${data.salaryCap?.toLocaleString?.() ?? 0}</div>
+          <div class="font-semibold mb-2">Lineup · Proj ${data.totalProj} · $${(data.usedSalary||0).toLocaleString()} / $${(data.salaryCap||0).toLocaleString()}</div>
           <ul class="space-y-1">
-            ${(data.lineup||[]).map(p=>`<li>• ${p.pos} ${p.name} (${p.team}) — \$${p.salary} · ${p.proj}</li>`).join('')}
+            ${(data.lineup||[]).map(p=>`<li>• ${p.pos} ${p.name} (${p.team}) — $${p.salary} · ${p.proj}</li>`).join('')}
           </ul>
-        </div>
-      `;
+        </div>`;
     }
+
+    // Admin actions
+    async function adminUpload(){
+      const token=document.getElementById('admToken').value.trim();
+      const file=document.getElementById('csvFile').files[0];
+      const msg=document.getElementById('admMsg');
+      if(!token||!file){ msg.textContent='Token and CSV required'; return; }
+      const fd=new FormData(); fd.append('file', file);
+      const res=await fetch(api('/api/admin/upload-players'),{ method:'POST', headers:{'x-admin-token':token}, body:fd });
+      const data=await res.json(); msg.textContent = res.ok ? `Uploaded ${data.count} players` : (data.error||'Upload failed');
+      if(res.ok) loadPlayers();
+    }
+    async function adminFetch(){
+      const token=document.getElementById('admToken').value.trim();
+      const url=document.getElementById('csvUrl').value.trim();
+      const msg=document.getElementById('admMsg');
+      if(!token){ msg.textContent='Token required'; return; }
+      const res=await fetch(api('/api/admin/fetch-players'),{ method:'POST', headers:{'Content-Type':'application/json','x-admin-token':token}, body:JSON.stringify(url?{url}:{}) });
+      const data=await res.json(); msg.textContent = res.ok ? `Fetched ${data.count} players` : (data.error||'Fetch failed');
+      if(res.ok) loadPlayers();
+    }
+    document.getElementById('btnUpload').addEventListener('click', adminUpload);
+    document.getElementById('btnFetch').addEventListener('click', adminFetch);
 
     document.getElementById('optBtn').addEventListener('click', optimize);
     loadPlayers();
