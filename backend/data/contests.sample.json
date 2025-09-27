@@ -1,0 +1,4 @@
+[
+  {"id":"CASH50","name":"$1 50/50","entryFee":1,"prizeStructure":"50/50","site":"DFS-Sim"},
+  {"id":"GPP10","name":"$10 GPP","entryFee":10,"prizeStructure":"Top-heavy","site":"DFS-Sim"}
+]
