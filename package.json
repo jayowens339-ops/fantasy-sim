@@ -1,9 +1,16 @@
 {
   "name": "fantasy-sim",
+  "version": "1.0.0",
+  "description": "Full-stack Fantasy Sports Simulator (frontend + backend)",
   "private": true,
-  "workspaces": ["backend","frontend","packages/*"],
   "scripts": {
-    "dev": "npm run dev -w backend",
-    "start": "npm start -w backend"
+    "dev": "concurrently \"npm run dev --prefix backend\" \"npm run dev --prefix frontend\"",
+    "start": "npm run start --prefix backend"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  },
+  "engines": {
+    "node": ">=18.x"
   }
 }
