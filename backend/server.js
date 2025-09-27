@@ -1,6 +1,6 @@
 // backend/server.js
-// Real NFL names via nflverse + weighted PPR projections + rules-aware optimizer.
-// Stacks: QB + 1 WR/TE (tries for 2). No DST with same-team offense. Salary cap enforced.
+// Real NFL names (nflverse) + weighted PPR projections + rules-aware optimizer
+// NEW: multi-lineup generation (count), diversified by stacks & slight randomness.
 
 const express = require("express");
 const cors = require("cors");
@@ -42,6 +42,7 @@ const teamWeekUrl = (season) =>
 
 // ----- Utilities -----
 const n = (v) => (v === null || v === undefined || v === "" ? 0 : Number(v) || 0);
+const rnd = (min, max) => min + Math.random() * (max - min);
 
 function pprRow(r){
   const passY = n(r.passing_yards || r.pass_yds);
@@ -209,47 +210,38 @@ async function ensureFresh(){
 setInterval(()=>{ ensureFresh().catch(()=>{}); }, 30*60*1000);
 ensureFresh().catch(()=>{});
 
-// ---------- Rules-aware optimizer ----------
-//
-// Roster: QB1, RB2, WR3, TE1, FLEX1 (RB/WR/TE), DST1
-// Rules:
-//  - Must include QB + 1 WR/TE from same team (stack).
-//  - Tries to add a 2nd WR/TE from QB’s team if it improves projection.
-//  - No DST with same-team offense (QB/RB/WR/TE).
-//
-function optimizeWithRules(players, salaryCap=50000){
+// ---------- Rules-aware optimizer (single lineup) ----------
+function optimizeWithRules(players, salaryCap=50000, noise=0){
   const roster = { QB:1, RB:2, WR:3, TE:1, FLEX:1, DST:1 };
-  const flexPos = new Set(["RB","WR","TE"]);
 
-  // split by pos + sort by value density
+  // add slight randomness to diversify if noise>0
+  const noisy = players.map(p => ({
+    ...p,
+    projAdj: p.proj + (noise ? rnd(-noise, noise) : 0)
+  }));
+
   const byPos = { QB:[], RB:[], WR:[], TE:[], DST:[] };
-  for(const p of players) if (byPos[p.pos]) byPos[p.pos].push(p);
+  for(const p of noisy) if (byPos[p.pos]) byPos[p.pos].push(p);
   for(const k of Object.keys(byPos)){
     byPos[k].sort((a,b)=>{
-      const va=(a.proj||0)/Math.max(1,a.salary||1);
-      const vb=(b.proj||0)/Math.max(1,b.salary||1);
+      const va=(a.projAdj||0)/Math.max(1,a.salary||1);
+      const vb=(b.projAdj||0)/Math.max(1,b.salary||1);
       if(vb!==va) return vb-va;
-      return (b.proj||0)-(a.proj||0);
+      return (b.projAdj||0)-(a.projAdj||0);
     });
   }
 
-  const topK = (arr,k)=>arr.slice(0,k);
-
-  // try top N QBs to keep it fast
-  const qbList = topK(byPos.QB, 12);
+  const qbList = byPos.QB.slice(0,12);
   let best=null;
 
   for(const qb of qbList){
-    // pass-catchers from same team
     const sameTeamWRTE = [...byPos.WR, ...byPos.TE].filter(x=>x.team===qb.team);
+
     if (!sameTeamWRTE.length) continue;
 
-    // try best 1 or 2 stack mates
+    // Build candidate stacks (1- and 2-player)
     const stackCombos = [];
-    sameTeamWRTE.slice(0,6).forEach(a=>{
-      stackCombos.push([a]);
-    });
-    // add 2-stack variants (limited breadth)
+    sameTeamWRTE.slice(0,6).forEach(a => stackCombos.push([a]));
     for(const a of sameTeamWRTE.slice(0,4)){
       for(const b of sameTeamWRTE.slice(0,6)){
         if (a.id!==b.id) stackCombos.push([a,b]);
@@ -263,112 +255,101 @@ function optimizeWithRules(players, salaryCap=50000){
 
       if (used > salaryCap) continue;
 
-      // fill DST first (avoid same-team offense)
+      // pick DST (avoid same-team offense)
       const dstPick = byPos.DST.find(d => !lineup.some(o => o.team===d.team));
-      if (!dstPick) continue;
-      if (used + dstPick.salary > salaryCap) continue;
+      if (!dstPick || used + dstPick.salary > salaryCap) continue;
       lineup.push(dstPick); taken.add(dstPick.id); used += dstPick.salary;
 
-      // fill RB, WR, TE slots (respect counts)
       const need = { QB:1, RB:2, WR:3, TE:1, FLEX:1, DST:1 };
-      // already filled counts:
-      need.QB -= 1;
-      need.DST -= 1;
-      for(const s of stack){
-        need[s.pos] -= 1;
-      }
+      need.QB -= 1; need.DST -= 1; for (const s of stack) need[s.pos] -= 1;
 
       function addBest(posList, count){
         for(const p of posList){
           if (!count) break;
           if (taken.has(p.id)) continue;
-          if (p.team === dstPick.team) continue; // no DST with same-team offense
+          if (p.team === dstPick.team) continue;
           if (used + p.salary > salaryCap) continue;
           lineup.push(p); taken.add(p.id); used += p.salary; count--;
         }
         return count;
       }
 
-      // strict positions first
       let rbNeed = need.RB, wrNeed = need.WR, teNeed = need.TE;
       rbNeed = addBest(byPos.RB, rbNeed);
       wrNeed = addBest(byPos.WR, wrNeed);
       teNeed = addBest(byPos.TE, teNeed);
+      if (rbNeed>0 || wrNeed>0 || teNeed>0) continue;
 
-      if (rbNeed>0 || wrNeed>0 || teNeed>0) {
-        // couldn't fill core slots -> skip
-        continue;
-      }
-
-      // fill FLEX (RB/WR/TE) with best remaining value
+      // FLEX
       const flexPool = [...byPos.RB, ...byPos.WR, ...byPos.TE]
         .filter(p => !taken.has(p.id) && p.team !== dstPick.team);
-
       for(const p of flexPool){
         if (!need.FLEX) break;
         if (used + p.salary > salaryCap) continue;
         lineup.push(p); taken.add(p.id); used += p.salary; need.FLEX--;
       }
-
-      // validate roster size
-      if (lineup.length !== 9) {
-        // Try to pad with cheapest remaining that fits + rules
-        const allPool = [...byPos.RB, ...byPos.WR, ...byPos.TE].filter(p=>!taken.has(p.id) && p.team !== dstPick.team);
-        while(lineup.length < 9 && allPool.length){
-          const p = allPool.shift();
-          if (used + p.salary > salaryCap) continue;
-          lineup.push(p); taken.add(p.id); used += p.salary;
-        }
-      }
       if (lineup.length !== 9) continue;
 
-      const proj = Number(lineup.reduce((s,p)=>s+(p.proj||0),0).toFixed(2));
-      const candidate = { salaryCap, usedSalary: used, totalProj: proj, lineup };
-
+      const proj = Number(lineup.reduce((s,p)=>s+(p.projAdj||p.proj||0),0).toFixed(2));
+      const candidate = { salaryCap, usedSalary: used, totalProj: proj, lineup: lineup.map(({projAdj, ...rest})=>rest) };
       if (!best || candidate.totalProj > best.totalProj) best = candidate;
     }
   }
 
-  // If nothing built (rare), fall back to simple greedy
+  // If nothing built, quick greedy fallback
   if (!best) {
-    best = simpleGreedy(players, salaryCap);
+    const sorted = [...noisy].sort((a,b)=>{
+      const va=(a.projAdj||0)/Math.max(1,a.salary||1);
+      const vb=(b.projAdj||0)/Math.max(1,b.salary||1);
+      if(vb!==va) return vb-va;
+      return (b.projAdj||0)-(a.projAdj||0);
+    });
+    const taken=new Set(); let used=0; const lineup=[];
+    function add(p){ if(taken.has(p.id)||used+p.salary>salaryCap) return false; lineup.push(p); taken.add(p.id); used+=p.salary; return true; }
+    // Fill rough roster
+    const order=["QB","RB","RB","WR","WR","WR","TE","DST"];
+    for(const pos of order){
+      const pick = sorted.find(x => x.pos===pos && !taken.has(x.id));
+      if (pick) add(pick);
+    }
+    // FLEX
+    const flexPick = sorted.find(x => ["RB","WR","TE"].includes(x.pos) && !taken.has(x.id));
+    if (flexPick) add(flexPick);
+    const proj = Number(lineup.reduce((s,p)=>s+(p.projAdj||p.proj||0),0).toFixed(2));
+    best = { salaryCap, usedSalary: used, totalProj: proj, lineup: lineup.map(({projAdj, ...rest})=>rest) };
   }
   return best;
 }
 
-function simpleGreedy(players, salaryCap=50000){
-  const roster = { QB:1, RB:2, WR:3, TE:1, FLEX:1, DST:1 };
-  const flexFrom = new Set(["RB","WR","TE"]);
+// ---------- Multi-lineup generator ----------
+function uniqueKey(lineup){
+  return lineup.map(p=>p.id).sort().join("|");
+}
 
-  const sorted = [...players].sort((a,b)=>{
-    const va=(a.proj||0)/Math.max(1,a.salary||1);
-    const vb=(b.proj||0)/Math.max(1,b.salary||1);
-    if(vb!==va) return vb-va;
-    return (b.proj||0)-(a.proj||0);
-  });
+function generateLineups(players, { salaryCap=50000, count=20, noise=1.2 } = {}){
+  const lineups = [];
+  const seen = new Set();
+  const qbTeams = Array.from(new Set(players.filter(p=>p.pos==="QB").map(q=>q.team)));
 
-  const taken=new Set(); let used=0; const lineup=[];
+  // Try cycles with varying noise & different QB teams to diversify
+  let tries = 0, maxTries = count * 12;
+  while (lineups.length < count && tries < maxTries) {
+    tries++;
+    const n = noise * (0.6 + Math.random()*0.8); // vary noise a bit per try
+    const res = optimizeWithRules(players, salaryCap, n);
+    if (!res || !res.lineup || res.lineup.length !== 9) continue;
 
-  function add(p){
-    if(taken.has(p.id)) return false;
-    if(used + p.salary > salaryCap) return false;
-    lineup.push(p); taken.add(p.id); used += p.salary; return true;
+    // enforce uniqueness by player set
+    const key = uniqueKey(res.lineup);
+    if (seen.has(key)) continue;
+
+    seen.add(key);
+    lineups.push(res);
   }
 
-  // Fill strict positions
-  for (const pos of ["QB","RB","RB","WR","WR","WR","TE"]){
-    const p = sorted.find(x => x.pos===pos && !taken.has(x.id));
-    if(!p || !add(p)) return { salaryCap, usedSalary: 0, totalProj:0, lineup:[] };
-  }
-  // FLEX
-  const flex = sorted.find(x => flexFrom.has(x.pos) && !taken.has(x.id));
-  if (flex) add(flex);
-  // DST (avoid same-team offense)
-  const dst = sorted.find(x => x.pos==="DST" && !lineup.some(o=>o.team===x.team));
-  if (dst) add(dst);
-
-  const proj = Number(lineup.reduce((s,p)=>s+(p.proj||0),0).toFixed(2));
-  return { salaryCap, usedSalary: used, totalProj: proj, lineup };
+  // sort best first
+  lineups.sort((a,b)=> (b.totalProj - a.totalProj) || (a.usedSalary - b.usedSalary));
+  return lineups;
 }
 
 // ---------- Routes ----------
@@ -383,24 +364,82 @@ app.get("/api/players", async (_req,res)=>{
   catch(e){ res.status(500).json({ error:String(e.message||e) }); }
 });
 
+// NEW: support multiple lineups via `count` or `constraints.numLineups`
 app.post("/api/lineups/optimize", async (req,res)=>{
   try{ await ensureFresh(); }catch{}
   const cap = Number(req.body?.constraints?.salaryCap ?? 50000);
-  res.json(optimizeWithRules(PLAYERS, cap));
+  const count = Number(req.body?.constraints?.numLineups ?? req.body?.count ?? 1);
+  const noise = Number(req.body?.constraints?.noise ?? 1.2); // 0=none, 0.5=low, 1–2 typical
+
+  if (count <= 1) {
+    const one = optimizeWithRules(PLAYERS, cap, noise);
+    return res.json(one);
+  }
+  const many = generateLineups(PLAYERS, { salaryCap: cap, count, noise });
+  return res.json({ salaryCap: cap, count: many.length, lineups: many });
 });
 
+// Legacy single-lineup endpoint (still works)
 app.post("/api/optimize", async (req,res)=>{
   try{ await ensureFresh(); }catch{}
   const cap = Number(req.body?.salaryCap ?? 50000);
-  res.json(optimizeWithRules(PLAYERS, cap));
+  const one = optimizeWithRules(PLAYERS, cap, 1.0);
+  res.json(one);
 });
 
+// Admin: force refresh
 app.post("/api/admin/refresh", async (req,res)=>{
   const token = req.headers["x-admin-token"] || req.query.token || "";
   if (token !== ADMIN_TOKEN) return res.status(401).json({ error:"Unauthorized" });
   try{ const info = await refreshPlayers(); res.json({ ok:true, ...info }); }
   catch(e){ res.status(500).json({ error:String(e.message||e) }); }
 });
+
+// ---------- Data refresh helpers ----------
+async function fetchSeason(season){
+  const [pRes,tRes] = await Promise.all([
+    fetch(playerWeekUrl(season), { headers:{ "User-Agent":"fantasy-sim/1.0" } }),
+    fetch(teamWeekUrl(season),   { headers:{ "User-Agent":"fantasy-sim/1.0" } }),
+  ]);
+  if(!pRes.ok) throw new Error(`players ${season}: HTTP ${pRes.status}`);
+  if(!tRes.ok) throw new Error(`teams ${season}: HTTP ${tRes.status}`);
+  const [pText,tText] = await Promise.all([pRes.text(), tRes.text()]);
+  const pParsed = Papa.parse(pText, { header:true, skipEmptyLines:true });
+  const tParsed = Papa.parse(tText, { header:true, skipEmptyLines:true });
+
+  const offense = buildOffense(pParsed.data || []);
+  const dst     = buildDST(tParsed.data || []);
+  const all     = [...offense, ...dst].filter(p=>p.name&&p.pos);
+  return { players: all, count: all.length };
+}
+
+async function refreshPlayers(){
+  const tries=[];
+  for(const season of TRY_SEASONS){
+    try{
+      const { players, count } = await fetchSeason(season);
+      if(!count){ tries.push(`${season}: 0 players`); continue; }
+      PLAYERS = players;
+      LAST_REFRESH = new Date().toISOString();
+      LAST_SOURCE  = `nflverse ${season}`;
+      return { ok:true, season, count };
+    }catch(e){ tries.push(`${season}: ${e.message}`); }
+  }
+  throw new Error(tries.join(" | "));
+}
+
+async function ensureFresh(){
+  if(!PLAYERS.length){
+    try{ await refreshPlayers(); }
+    catch{
+      PLAYERS=[...SAMPLE]; LAST_REFRESH=new Date().toISOString(); LAST_SOURCE="fallback:sample";
+    }
+    return;
+  }
+  if(Date.now()-Date.parse(LAST_REFRESH) > REFRESH_MS){
+    try{ await refreshPlayers(); } catch {/* keep old */}
+  }
+}
 
 // ---------- Boot ----------
 app.listen(PORT, "0.0.0.0", ()=>{
