@@ -17,23 +17,6 @@
     </div>
   </div>
 
-  <!-- Admin data loader (hidden by default) -->
-  <div id="adminPanel" class="fixed top-14 right-3 text-xs bg-slate-900/80 border border-slate-700 rounded p-3 space-y-2 hidden">
-    <div class="flex items-center justify-between">
-      <div class="font-semibold">Admin Data Loader</div>
-      <button id="adminClose" title="Hide" class="px-2 py-0.5 rounded bg-slate-800 border border-slate-700">✕</button>
-    </div>
-    <!-- Pre-filled with your admin token -->
-    <input id="admToken" value="Truetrenddfs4u!" class="w-64 bg-slate-800 rounded px-2 py-1 border border-slate-700" placeholder="Admin Token">
-    <input id="csvUrl" class="w-64 bg-slate-800 rounded px-2 py-1 border border-slate-700" placeholder="CSV URL (optional)">
-    <div class="flex gap-2 items-center">
-      <input id="csvFile" type="file" accept=".csv" class="text-slate-300">
-      <button id="btnUpload" class="px-2 py-1 rounded bg-blue-500 text-black font-semibold">Upload CSV</button>
-    </div>
-    <button id="btnFetch" class="px-2 py-1 rounded bg-amber-400 text-black font-semibold w-full">Fetch From URL</button>
-    <div id="admMsg" class="text-slate-300"></div>
-  </div>
-
   <div class="max-w-6xl mx-auto p-6">
     <header class="flex items-center justify-between">
       <h1 class="text-2xl font-bold">Fantasy Sim</h1>
@@ -44,6 +27,7 @@
       <section class="md:col-span-2 bg-slate-900/60 rounded-2xl p-4 border border-slate-800">
         <h2 class="text-lg font-semibold mb-3">Players</h2>
         <div id="players" class="grid grid-cols-2 md:grid-cols-3 gap-3"></div>
+        <div id="playersMsg" class="text-slate-300 text-sm mt-3"></div>
       </section>
 
       <aside class="bg-slate-900/60 rounded-2xl p-4 border border-slate-800">
@@ -62,102 +46,72 @@
   </div>
 
   <script>
-    // --- Config ---
-    const ALLOWED_HOSTS = ["fantasy-sim.vercel.app", "localhost", "127.0.0.1"]; // change if needed
-    const DEFAULT_ADMIN_TOKEN = "Truetrenddfs4u!";
-
     // --- API base handling (saved to localStorage)
     function api(path){
       const base=(localStorage.getItem('API_BASE')||'').trim();
-      if(!base) return path;
+      if(!base) return path; // same-origin (local dev)
       return path.startsWith('/') ? base+path : base+'/'+path;
     }
 
     // --- UI elements
     const cfgBtn=document.getElementById('cfgBtn'), cfgPanel=document.getElementById('cfgPanel');
     const apiInput=document.getElementById('apiInput'), saveApi=document.getElementById('saveApi');
-    const playersDiv=document.getElementById('players'), resultDiv=document.getElementById('result');
-    const capInput=document.getElementById('cap'), healthLink=document.getElementById('healthLink');
-    const adminPanel=document.getElementById('adminPanel');
-    const adminClose=document.getElementById('adminClose');
-    const admToken=document.getElementById('admToken');
-    const admMsg=document.getElementById('admMsg');
+    const playersDiv=document.getElementById('players'), playersMsg=document.getElementById('playersMsg');
+    const resultDiv=document.getElementById('result'), capInput=document.getElementById('cap');
+    const healthLink=document.getElementById('healthLink');
 
-    // Prefill token
-    admToken.value = DEFAULT_ADMIN_TOKEN;
-
-    // Show admin panel only on allowed hosts (or via secret hotkey)
-    function setAdminVisibility(visible){
-      adminPanel.classList.toggle('hidden', !visible);
-    }
-    const onAllowedHost = ALLOWED_HOSTS.includes(location.hostname);
-    setAdminVisibility(onAllowedHost);
-
-    // Secret hotkey: Ctrl/⌘ + Alt + A to toggle admin panel anywhere
-    window.addEventListener('keydown', (e)=>{
-      const ctrlCmd = e.ctrlKey || e.metaKey;
-      if (ctrlCmd && e.altKey && (e.key==='a' || e.key==='A')) {
-        setAdminVisibility(adminPanel.classList.contains('hidden'));
-      }
-    });
-    adminClose.onclick = ()=> setAdminVisibility(false);
-
-    // API panel wiring
     apiInput.value = localStorage.getItem('API_BASE') || '';
     cfgBtn.onclick = ()=> cfgPanel.classList.toggle('hidden');
-    saveApi.onclick = ()=>{ const v=(apiInput.value||'').trim().replace(/\/+$/,''); if(v) localStorage.setItem('API_BASE',v); else localStorage.removeItem('API_BASE'); alert('Saved! Refreshing…'); location.reload(); };
+    saveApi.onclick = ()=>{
+      const v=(apiInput.value||'').trim().replace(/\/+$/,'');
+      if(v) localStorage.setItem('API_BASE',v); else localStorage.removeItem('API_BASE');
+      alert('Saved! Refreshing…'); location.reload();
+    };
     healthLink.onclick = (e)=>{ e.preventDefault(); window.open(api('/api/health'),'_blank'); };
 
-    // Load players
+    // --- Load players from backend
     async function loadPlayers(){
-      const res=await fetch(api('/api/players'));
-      // Backend might return either {players:[...]} or plain array; support both:
-      const data=await res.json();
-      const players=Array.isArray(data) ? data : (data.players||[]);
-      playersDiv.innerHTML=players.map(p=>`
-        <div class="p-3 rounded-xl bg-slate-800 border border-slate-700">
-          <div class="font-semibold">${p.name}</div>
-          <div class="text-xs text-slate-300">${p.team} · ${p.pos}</div>
-          <div class="mt-2 text-sm">💰 ${p.salary?.toLocaleString?.() ?? p.salary} · 📈 ${p.proj ?? 0}</div>
-        </div>
-      `).join('');
+      playersMsg.textContent = 'Loading players...';
+      try{
+        const res = await fetch(api('/api/players'));
+        if(!res.ok) throw new Error('HTTP '+res.status);
+        const data = await res.json();
+        const players = Array.isArray(data) ? data : (data.players || []);
+        if(players.length===0){
+          playersMsg.textContent = 'No players returned yet. If this is the first hit after sleep, wait ~10s and refresh.';
+          return;
+        }
+        playersMsg.textContent = '';
+        playersDiv.innerHTML = players.map(p=>`
+          <div class="p-3 rounded-xl bg-slate-800 border border-slate-700">
+            <div class="font-semibold">${p.name}</div>
+            <div class="text-xs text-slate-300">${p.team} · ${p.pos}</div>
+            <div class="mt-2 text-sm">💰 ${p.salary?.toLocaleString?.() ?? p.salary} · 📈 ${p.proj ?? 0}</div>
+          </div>
+        `).join('');
+      }catch(err){
+        playersMsg.textContent = 'Could not load players. Check API URL (⚙️) & CORS.';
+        console.error(err);
+      }
     }
 
-    // Optimize
+    // --- Optimize using backend
     async function optimize(){
-      const body={ salaryCap:Number(capInput.value||50000) };
-      const res=await fetch(api('/api/optimize'),{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)});
+      const constraints={ salaryCap:Number(capInput.value||50000) };
+      const res=await fetch(api('/api/lineups/optimize'),{
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({constraints})
+      });
       const data=await res.json();
       const lineup = data.lineup || [];
       resultDiv.innerHTML=`
         <div class="p-3 rounded-xl bg-slate-800 border border-slate-700">
-          <div class="font-semibold mb-2">Lineup · Proj ${data.projTotal ?? 0} · $${(data.usedSalary||0).toLocaleString()} / $${(body.salaryCap||0).toLocaleString()}</div>
+          <div class="font-semibold mb-2">Lineup · Proj ${data.totalProj ?? data.projTotal ?? 0} · $${(data.usedSalary||0).toLocaleString()} / $${(constraints.salaryCap||0).toLocaleString()}</div>
           <ul class="space-y-1">
             ${lineup.map(p=>`<li>• ${p.pos} ${p.name} (${p.team}) — $${p.salary} · ${p.proj}</li>`).join('')}
           </ul>
         </div>`;
     }
-
-    // Admin actions
-    async function adminUpload(){
-      const token=document.getElementById('admToken').value.trim();
-      const file=document.getElementById('csvFile').files[0];
-      if(!token||!file){ admMsg.textContent='Token and CSV required'; return; }
-      const fd=new FormData(); fd.append('file', file);
-      const res=await fetch(api('/api/admin/upload-players'),{ method:'POST', headers:{'x-admin-token':token }, body:fd });
-      const data=await res.json(); admMsg.textContent = res.ok ? `Uploaded ${data.count} players` : (data.error||'Upload failed');
-      if(res.ok) loadPlayers();
-    }
-    async function adminFetch(){
-      const token=document.getElementById('admToken').value.trim();
-      const url=document.getElementById('csvUrl').value.trim();
-      if(!token){ admMsg.textContent='Token required'; return; }
-      const res=await fetch(api('/api/admin/fetch-players'),{ method:'POST', headers:{'Content-Type':'application/json','x-admin-token':token}, body:JSON.stringify(url?{url}:{}) });
-      const data=await res.json(); admMsg.textContent = res.ok ? `Fetched ${data.count} players` : (data.error||'Fetch failed');
-      if(res.ok) loadPlayers();
-    }
-    document.getElementById('btnUpload').addEventListener('click', adminUpload);
-    document.getElementById('btnFetch').addEventListener('click', adminFetch);
 
     document.getElementById('optBtn').addEventListener('click', optimize);
     loadPlayers();
