@@ -4,11 +4,10 @@ const cors = require("cors");
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-// CORS — keep permissive to avoid blocks while you test
 app.use(cors({ origin: process.env.CORS_ORIGIN || "*" }));
 app.use(express.json());
 
-// Always-available sample players (so UI works instantly)
+// Sample players so UI works immediately
 const SAMPLE = [
   { id:"QB1",  name:"J. Elite",      team:"NE",  pos:"QB",  salary:7200, proj:22.5 },
   { id:"QB2",  name:"K. Gunslinger", team:"KC",  pos:"QB",  salary:7600, proj:23.1 },
@@ -27,18 +26,18 @@ const SAMPLE = [
 
 let PLAYERS = [...SAMPLE];
 
-// Health + Players
 app.get("/api/health", (_req, res) => {
   res.json({ ok: true, players: PLAYERS.length, time: new Date().toISOString() });
 });
+
 app.get("/api/players", (_req, res) => {
   res.json({ players: PLAYERS });
 });
 
-// Simple greedy optimizer (value = proj/$, with position requirements)
 function optimize(players, salaryCap = 50000) {
   const roster = { QB:1, RB:2, WR:3, TE:1, FLEX:1, DST:1 };
   const flexFrom = ["RB","WR","TE"];
+
   const sorted = [...players].sort((a,b)=>{
     const va=(a.proj||0)/Math.max(1,a.salary||1);
     const vb=(b.proj||0)/Math.max(1,b.salary||1);
@@ -53,13 +52,11 @@ function optimize(players, salaryCap = 50000) {
     usedIds.add(p.id); lineup.push(p); used += p.salary; return true;
   };
 
-  // strict positions
   for (const [pos, need] of Object.entries(roster)) {
     if (pos === "FLEX") continue;
     let left = need;
     for (const p of sorted) if (left && p.pos === pos) left -= add(p) ? 1 : 0;
   }
-  // flex
   let flexNeed = roster.FLEX || 0;
   for (const p of sorted) if (flexNeed && flexFrom.includes(p.pos)) flexNeed -= add(p) ? 1 : 0;
 
@@ -67,19 +64,19 @@ function optimize(players, salaryCap = 50000) {
   return { salaryCap, usedSalary: used, totalProj, lineup };
 }
 
-// NEW endpoint the frontend prefers
+// Preferred route
 app.post("/api/lineups/optimize", (req, res) => {
   const cap = Number(req.body?.constraints?.salaryCap ?? 50000);
   res.json(optimize(PLAYERS, cap));
 });
 
-// LEGACY fallback endpoint
+// Legacy fallback route
 app.post("/api/optimize", (req, res) => {
   const cap = Number(req.body?.salaryCap ?? 50000);
   res.json(optimize(PLAYERS, cap));
 });
 
-// Start
-app.listen(PORT, () => {
+// Bind to 0.0.0.0 for Render
+app.listen(PORT, "0.0.0.0", () => {
   console.log(`Fantasy backend running on port ${PORT}`);
 });
