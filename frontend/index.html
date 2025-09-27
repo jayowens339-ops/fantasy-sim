@@ -3,23 +3,41 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Fantasy Sim — Multi-Lineup Optimizer</title>
+  <title>Fantasy Sim — Optimizer</title>
   <script src="https://cdn.tailwindcss.com"></script>
+  <meta name="color-scheme" content="dark">
 </head>
 <body class="bg-slate-950 text-slate-100">
-  <!-- API config -->
+  <!-- CONFIG / ADMIN -->
   <div class="fixed top-3 right-3 text-xs z-50">
-    <button id="cfgBtn" class="px-2 py-1 rounded bg-slate-800 border border-slate-700">⚙️ API</button>
-    <div id="cfgPanel" class="hidden mt-2 p-3 rounded bg-slate-900 border border-slate-700 shadow-xl space-y-2">
-      <div class="font-semibold">Backend URL</div>
-      <input id="apiInput" class="w-80 bg-slate-800 rounded px-2 py-1 border border-slate-700"
-             placeholder="https://your-backend.onrender.com" />
-      <div class="flex gap-2">
-        <button id="saveApi"  class="px-2 py-1 rounded bg-green-500 text-black font-semibold">Save</button>
-        <button id="clearApi" class="px-2 py-1 rounded bg-slate-800 border border-slate-700">Clear</button>
+    <button id="cfgBtn" class="px-2 py-1 rounded bg-slate-800 border border-slate-700 hover:bg-slate-700">⚙️ API</button>
+    <div id="cfgPanel" class="hidden mt-2 p-4 rounded bg-slate-900 border border-slate-700 shadow-xl space-y-3 w-[420px]">
+      <div class="space-y-1">
+        <div class="font-semibold">Backend URL</div>
+        <input id="apiInput" class="w-full bg-slate-800 rounded px-2 py-1 border border-slate-700" placeholder="https://your-backend.onrender.com" />
+        <div class="text-slate-400">No trailing slash. Example: <span class="underline">https://fantasy-sim.onrender.com</span></div>
+        <div class="flex gap-2 pt-1">
+          <button id="saveApi" class="px-2 py-1 rounded bg-green-500 text-black font-semibold">Save</button>
+          <button id="clearApi" class="px-2 py-1 rounded bg-slate-800 border border-slate-700">Clear</button>
+        </div>
       </div>
-      <div class="text-slate-400">
-        No trailing slash. Example: <span class="underline">https://fantasy-sim.onrender.com</span>
+
+      <div class="pt-3 border-t border-slate-700 space-y-2">
+        <div class="font-semibold">DraftKings CSV Loader</div>
+        <input id="dkUrl" class="w-full bg-slate-800 rounded px-2 py-1 border border-slate-700" placeholder="https://raw.githubusercontent.com/.../DKSalaries.csv"/>
+        <div class="grid grid-cols-3 gap-2">
+          <label class="col-span-2 text-xs">Admin Token
+            <input id="adminToken" class="w-full mt-1 bg-slate-800 rounded px-2 py-1 border border-slate-700" value="Truetrenddfs4u!" />
+          </label>
+          <button id="dkLoad" class="mt-[22px] px-2 py-2 rounded bg-blue-500 text-black font-semibold hover:opacity-90">Load DK</button>
+        </div>
+        <div class="text-slate-400 text-xs">
+          DK links often need login. If fetch fails, upload the CSV somewhere public (e.g., GitHub Gist raw URL) and try that URL here.
+        </div>
+        <div class="flex gap-2">
+          <button id="refreshNflverse" class="px-2 py-1 rounded bg-slate-800 border border-slate-700">↻ Reload NFL (nflverse)</button>
+          <div id="adminMsg" class="text-[11px] text-slate-300 self-center"></div>
+        </div>
       </div>
     </div>
   </div>
@@ -29,12 +47,12 @@
       <h1 class="text-2xl font-bold">Fantasy Sim</h1>
       <nav class="flex items-center gap-4 text-xs">
         <a id="healthLink" href="#" class="underline">API Health</a>
-        <button id="refreshBtn" class="px-2 py-1 rounded bg-slate-800 border border-slate-700">↻ Reload Players</button>
+        <button id="reloadPlayers" class="px-2 py-1 rounded bg-slate-800 border border-slate-700">⟳ Reload Players</button>
       </nav>
     </header>
 
     <main class="grid lg:grid-cols-3 gap-6 mt-6">
-      <!-- Players -->
+      <!-- PLAYERS -->
       <section class="lg:col-span-2 bg-slate-900/60 rounded-2xl p-4 border border-slate-800">
         <div class="flex items-center justify-between mb-3">
           <h2 class="text-lg font-semibold">Players</h2>
@@ -44,21 +62,21 @@
         <div id="playersMsg" class="text-slate-300 text-sm mt-3"></div>
       </section>
 
-      <!-- Optimizer -->
+      <!-- OPTIMIZER -->
       <aside class="bg-slate-900/60 rounded-2xl p-4 border border-slate-800">
         <h2 class="text-lg font-semibold mb-3">Optimizer</h2>
         <div class="space-y-3">
           <label class="block text-sm">Salary Cap
-            <input id="cap" type="number" class="mt-1 w-full bg-slate-800 rounded px-3 py-2" value="50000">
+            <input id="cap" type="number" class="mt-1 w-full bg-slate-800 rounded px-3 py-2 border border-slate-700" value="50000">
           </label>
           <label class="block text-sm"># of Lineups
-            <input id="count" type="number" class="mt-1 w-full bg-slate-800 rounded px-3 py-2" value="20" min="1" max="150">
+            <input id="count" type="number" class="mt-1 w-full bg-slate-800 rounded px-3 py-2 border border-slate-700" value="20" min="1" max="150">
           </label>
           <label class="block text-sm">Noise (diversification)
             <input id="noise" type="range" min="0" max="2" step="0.05" value="1.2" class="w-full">
             <div class="text-xs text-slate-300 mt-1">Higher noise ⇒ more variety (0 = deterministic)</div>
           </label>
-          <div class="grid grid-cols-2 gap-2">
+          <div class="grid grid-cols-2 gap-2 pt-1">
             <button id="optBtn" class="py-2 rounded-xl bg-green-500 text-black font-semibold hover:opacity-90">
               Generate
             </button>
@@ -71,7 +89,7 @@
       </aside>
     </main>
 
-    <!-- Results -->
+    <!-- RESULTS -->
     <section class="mt-6">
       <div class="flex items-center justify-between mb-3">
         <h2 class="text-lg font-semibold">Lineups</h2>
@@ -82,59 +100,87 @@
   </div>
 
   <script>
-    /* ---------- API base ---------- */
+    /* ============ API helpers ============ */
     function getApiBase(){ return (localStorage.getItem('API_BASE')||'').trim(); }
+    function setApiBase(v){ v = (v||'').trim().replace(/\/+$/,''); if(v) localStorage.setItem('API_BASE', v); else localStorage.removeItem('API_BASE'); }
     function api(path){
-      const base=getApiBase();
-      if(!base) return path; // same-origin (local dev)
+      const base = getApiBase();
+      if(!base) return path;                 // local dev (same origin)
       return path.startsWith('/') ? base+path : base+'/'+path;
     }
+    async function postJson(url, body, headers={}){
+      const r = await fetch(url, { method:'POST', headers:{'Content-Type':'application/json', ...headers}, body: JSON.stringify(body||{}) });
+      const t = await r.text(); let j;
+      try{ j = JSON.parse(t); }catch{ throw new Error(`Bad JSON from ${url}: ${t.slice(0,200)}`); }
+      if (!r.ok) throw new Error(`${url} → HTTP ${r.status}: ${t.slice(0,200)}`);
+      return j;
+    }
 
-    /* ---------- Elements ---------- */
-    const cfgBtn = document.getElementById('cfgBtn');
-    const cfgPanel = document.getElementById('cfgPanel');
-    const apiInput = document.getElementById('apiInput');
-    const saveApi = document.getElementById('saveApi');
-    const clearApi = document.getElementById('clearApi');
+    /* ============ Elements ============ */
+    const cfgBtn       = document.getElementById('cfgBtn');
+    const cfgPanel     = document.getElementById('cfgPanel');
+    const apiInput     = document.getElementById('apiInput');
+    const saveApi      = document.getElementById('saveApi');
+    const clearApi     = document.getElementById('clearApi');
+    const dkUrl        = document.getElementById('dkUrl');
+    const adminTokenEl = document.getElementById('adminToken');
+    const dkLoad       = document.getElementById('dkLoad');
+    const adminMsg     = document.getElementById('adminMsg');
+    const refreshNfv   = document.getElementById('refreshNflverse');
 
-    const playersEl = document.getElementById('players');
-    const playersMsg = document.getElementById('playersMsg');
+    const playersEl    = document.getElementById('players');
+    const playersMsg   = document.getElementById('playersMsg');
     const playersCount = document.getElementById('playersCount');
 
-    const capInput = document.getElementById('cap');
-    const countInput = document.getElementById('count');
-    const noiseInput = document.getElementById('noise');
-    const optBtn = document.getElementById('optBtn');
-    const optMsg = document.getElementById('optMsg');
+    const capInput     = document.getElementById('cap');
+    const countInput   = document.getElementById('count');
+    const noiseInput   = document.getElementById('noise');
+    const optBtn       = document.getElementById('optBtn');
+    const optMsg       = document.getElementById('optMsg');
 
-    const healthLink = document.getElementById('healthLink');
-    const refreshBtn = document.getElementById('refreshBtn');
+    const healthLink   = document.getElementById('healthLink');
+    const reloadBtn    = document.getElementById('reloadPlayers');
 
-    const lineupMeta = document.getElementById('lineupMeta');
-    const lineupsEl = document.getElementById('lineups');
-    const csvBtn = document.getElementById('csvBtn');
+    const lineupMeta   = document.getElementById('lineupMeta');
+    const lineupsEl    = document.getElementById('lineups');
+    const csvBtn       = document.getElementById('csvBtn');
 
-    /* ---------- UI wiring ---------- */
+    /* ============ UI wiring ============ */
     apiInput.value = getApiBase();
-    cfgBtn.onclick  = () => cfgPanel.classList.toggle('hidden');
-    saveApi.onclick = () => {
-      const v=(apiInput.value||'').trim().replace(/\/+$/,'');
-      if(v) localStorage.setItem('API_BASE', v); else localStorage.removeItem('API_BASE');
-      alert('Saved! Refreshing…'); location.reload();
-    };
-    clearApi.onclick = () => { localStorage.removeItem('API_BASE'); alert('Cleared. Refreshing…'); location.reload(); };
+
+    cfgBtn.onclick   = () => cfgPanel.classList.toggle('hidden');
+    saveApi.onclick  = () => { setApiBase(apiInput.value); alert('Saved! Refreshing…'); location.reload(); };
+    clearApi.onclick = () => { setApiBase(''); alert('Cleared. Refreshing…'); location.reload(); };
 
     healthLink.onclick = (e)=>{ e.preventDefault(); window.open(api('/api/health'), '_blank'); };
-    refreshBtn.onclick = async ()=>{
-      playersMsg.textContent = 'Refreshing…';
+
+    dkLoad.onclick = async () => {
+      adminMsg.textContent = 'Loading DK CSV…';
       try{
-        const res = await fetch(api('/api/admin/refresh'), { method:'POST', headers:{ 'x-admin-token': 'Truetrenddfs4u!' }});
-        playersMsg.textContent = res.ok ? 'Refreshed data. Loading players…' : 'Refresh failed.';
+        const url = dkUrl.value.trim();
+        if (!url) throw new Error('Paste a public DK CSV URL.');
+        const token = adminTokenEl.value.trim();
+        const j = await postJson(api('/api/admin/dk'), { url }, { 'x-admin-token': token });
+        adminMsg.textContent = `Loaded DraftKings: ${j.count} players`;
         await loadPlayers();
-      }catch(e){ playersMsg.textContent = 'Refresh failed: '+e.message; }
+      }catch(err){
+        adminMsg.textContent = 'DK load failed: '+err.message;
+      }
     };
 
-    /* ---------- Helpers ---------- */
+    refreshNfv.onclick = async () => {
+      adminMsg.textContent = 'Refreshing nflverse…';
+      try{
+        const token = adminTokenEl.value.trim();
+        const j = await postJson(api('/api/admin/refresh'), {}, { 'x-admin-token': token });
+        adminMsg.textContent = `Refreshed: ${j.count || j.players || '?'} players`;
+        await loadPlayers();
+      }catch(err){ adminMsg.textContent = 'Refresh failed: '+err.message; }
+    };
+
+    reloadBtn.onclick = loadPlayers;
+
+    /* ============ Helpers ============ */
     function fmtMoney(x){ return '$' + Number(x||0).toLocaleString(); }
     function download(filename, text){
       const a = document.createElement('a');
@@ -144,20 +190,21 @@
       document.body.appendChild(a); a.click(); document.body.removeChild(a);
     }
 
-    /* ---------- Load Players ---------- */
+    /* ============ Players Loader ============ */
     async function loadPlayers(){
       playersMsg.textContent = 'Loading players…';
       playersEl.innerHTML = '';
       try{
         const res = await fetch(api('/api/players'), { cache: 'no-store' });
         const raw = await res.text();
-        if(!res.ok) throw new Error(`HTTP ${res.status} ${raw.slice(0,120)}`);
-        let data; try{ data = JSON.parse(raw); } catch { throw new Error('Bad JSON: '+raw.slice(0,120)); }
+        if(!res.ok) throw new Error(`HTTP ${res.status} ${raw.slice(0,160)}`);
+        let data; try{ data = JSON.parse(raw); } catch { throw new Error('Bad JSON: '+raw.slice(0,160)); }
         const list = Array.isArray(data) ? data : (data.players || []);
         playersCount.textContent = `${list.length.toLocaleString()} players`;
         if(!list.length){ playersMsg.textContent = 'Backend returned 0 players.'; return; }
         playersMsg.textContent = '';
-        playersEl.innerHTML = list.slice(0,200).map(p => `
+        // Only render first 240 to keep UI snappy
+        playersEl.innerHTML = list.slice(0,240).map(p => `
           <div class="p-3 rounded-xl bg-slate-800 border border-slate-700">
             <div class="font-semibold truncate">${p.name}</div>
             <div class="text-xs text-slate-300">${p.team ?? ''} · ${p.pos ?? ''}</div>
@@ -170,8 +217,8 @@
       }
     }
 
-    /* ---------- Optimize (multi) ---------- */
-    function renderSingleLineupCard(obj, idx){
+    /* ============ Optimize (multi) ============ */
+    function renderLineupCard(obj, idx){
       const used = obj.usedSalary ?? 0;
       const proj = obj.totalProj ?? 0;
       const lineup = obj.lineup || [];
@@ -186,7 +233,6 @@
         </div>
       `;
     }
-
     function toCSV(lineups){
       const header = ['lineup','slot','pos','name','team','salary','proj'].join(',');
       const lines = [header];
@@ -207,40 +253,30 @@
       const count = Math.max(1, Math.min(150, Number(countInput.value || 1)));
       const noise = Number(noiseInput.value || 1.2);
 
-      // Preferred multi-lineup endpoint
-      async function postJson(url, payload){
-        const r = await fetch(url, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) });
-        const t = await r.text(); let j;
-        try{ j = JSON.parse(t); }catch{ throw new Error(`Bad JSON from ${url}: ${t.slice(0,160)}`); }
-        if (!r.ok) throw new Error(`${url} → HTTP ${r.status}: ${t.slice(0,160)}`);
-        return j;
-      }
-
       try{
         let result;
-        // If count > 1, ask backend for multiple
         if (count > 1) {
           result = await postJson(api('/api/lineups/optimize'), {
             constraints: { salaryCap, numLineups: count, noise }
           });
           const lineups = result.lineups || [];
-          lineupMeta.textContent = `Generated ${lineups.length} lineups · Salary Cap ${fmtMoney(result.salaryCap ?? salaryCap)}`;
           if (!lineups.length) throw new Error('No lineups returned.');
-          lineupsEl.innerHTML = lineups.map((L, i) => renderSingleLineupCard(L, i)).join('');
-          // Hook CSV export
+          lineupMeta.textContent = `Generated ${lineups.length} lineups · Salary Cap ${fmtMoney(result.salaryCap ?? salaryCap)}`;
+          lineupsEl.innerHTML = lineups.map((L, i) => renderLineupCard(L, i)).join('');
           csvBtn.onclick = ()=> download(`lineups_${lineups.length}.csv`, toCSV(lineups));
         } else {
-          // Single lineup path (works with both endpoints)
+          // single lineup
           try {
             result = await postJson(api('/api/lineups/optimize'), { constraints: { salaryCap, numLineups: 1, noise }});
           } catch {
             result = await postJson(api('/api/optimize'), { salaryCap });
           }
+          if (!result || !result.lineup) throw new Error('No lineup returned.');
           lineupMeta.textContent = `Generated 1 lineup · Salary Cap ${fmtMoney(salaryCap)}`;
-          lineupsEl.innerHTML = renderSingleLineupCard(result, 0);
-          csvBtn.onclick = ()=> download('lineups_1.csv', toCSV([{ lineup: result.lineup, totalProj: result.totalProj, usedSalary: result.usedSalary }]));
+          lineupsEl.innerHTML = renderLineupCard(result, 0);
+          csvBtn.onclick = ()=> download('lineups_1.csv',
+            toCSV([{ lineup: result.lineup, totalProj: result.totalProj, usedSalary: result.usedSalary }]));
         }
-
         optMsg.textContent = 'Done.';
       }catch(err){
         optMsg.textContent = 'Optimize failed: '+err.message;
@@ -251,7 +287,7 @@
     optBtn.addEventListener('click', optimize);
     csvBtn.addEventListener('click', ()=>alert('Generate lineups first, then export CSV.'));
 
-    // Boot
+    // Init
     loadPlayers();
   </script>
 </body>
