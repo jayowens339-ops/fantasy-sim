@@ -1,38 +1,85 @@
 // backend/server.js
-// Fantasy Sim backend: DraftKings CSV loader + nflverse fallback + multi-lineup optimizer
+// Fantasy Sim backend — DK CSV upload/URL + nflverse fallback + multi-lineup optimizer
 
 const express = require("express");
 const cors = require("cors");
 const Papa = require("papaparse");
 
 // ---------- Config ----------
-const PORT         = process.env.PORT || 5000;
-const ADMIN_TOKEN  = process.env.ADMIN_TOKEN || "Truetrenddfs4u!";
-const CORS_ORIGIN  = process.env.CORS_ORIGIN || "*";
+const PORT            = process.env.PORT || 5000;
+const ADMIN_TOKEN     = process.env.ADMIN_TOKEN || "Truetrenddfs4u!";
+const CORS_ORIGIN     = process.env.CORS_ORIGIN || "*";
 const DK_SALARIES_URL = process.env.DK_SALARIES_URL || ""; // optional public CSV
-const REFRESH_MS   = 6 * 60 * 60 * 1000; // 6h
+const REFRESH_MS      = 6 * 60 * 60 * 1000; // 6h
 
 // ---------- App ----------
 const app = express();
 app.use(cors({ origin: CORS_ORIGIN }));
-app.use(express.json({ limit: "10mb" }));
+app.use(express.json({ limit: "15mb" })); // allow big CSVs when sent as text in JSON
 
 // ---------- State ----------
-let PLAYERS = [];         // {id,name,team,pos,proj,salary}
+let PLAYERS = []; // array of {id, name, team, pos, proj, salary}
 let LAST_REFRESH = null;
 let LAST_SOURCE  = null;
 
-// ---------- Utilities ----------
+// ---------- Helpers ----------
 const n = (v) => (v === null || v === undefined || v === "" ? 0 : Number(v) || 0);
 const trim = (s) => (s || "").toString().trim();
 const rnd = (min, max) => min + Math.random() * (max - min);
 const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
+function fmtNum(x, d = 2) { return Number((x ?? 0).toFixed(d)); }
 
-function fmtNum(x, d=2){ return Number((x ?? 0).toFixed(d)); }
+// ---------- DraftKings CSV parsing ----------
+function parseDKCsvToPlayers(csvText){
+  const parsed = Papa.parse(csvText, { header: true, skipEmptyLines: true });
+  const rows = parsed.data || [];
+  const players = [];
 
-// ---------- nflverse helpers (fallback if no DK) ----------
+  for(const r of rows){
+    const posRaw = trim(r.Position || r["Roster Position"] || r["Roster Positions"] || r["RosterPosition"]);
+    const pos = posRaw.split(/[\/,]/)[0].toUpperCase(); // first eligible pos
+    const id = trim(r.ID || r["Player ID"] || r["DraftKings ID"] || r["ID"]);
+    const name = trim(r.Name || r["Player Name"] || "");
+    const team = trim(r.TeamAbbrev || r.Team || r["Team Abbrev"] || "");
+    const salary = n(r.Salary || r["DK Salary"] || r["Salary (DK)"]);
+    const proj = n(r.AvgPointsPerGame || r["Avg Points/GM"] || r.Projection || r.Proj || r.FPPG);
+
+    if(!name || !pos || !salary) continue;
+    const display = pos === "DST" ? `${team || name} D/ST` : name;
+
+    players.push({
+      id: id || `${name}_${team}_${pos}`,
+      name: display,
+      team: team.toUpperCase(),
+      pos,
+      salary,
+      proj
+    });
+  }
+
+  // de-dupe best projection per id
+  const map = new Map();
+  for(const p of players){
+    if(!map.has(p.id) || (p.proj||0) > (map.get(p.id).proj||0)) map.set(p.id, p);
+  }
+  return Array.from(map.values());
+}
+
+async function loadDKFromUrl(url){
+  const resp = await fetch(url, { headers: { "User-Agent": "fantasy-sim/1.0" }});
+  if(!resp.ok) throw new Error(`DK CSV fetch failed: HTTP ${resp.status}`);
+  const csvText = await resp.text();
+  const players = parseDKCsvToPlayers(csvText);
+  if(!players.length) throw new Error("No players in DK CSV (or unexpected headers)");
+  PLAYERS = players;
+  LAST_REFRESH = new Date().toISOString();
+  LAST_SOURCE = "draftkings";
+  return { ok: true, count: PLAYERS.length, source: LAST_SOURCE };
+}
+
+// ---------- nflverse fallback ----------
 const NOW_YEAR = new Date().getFullYear();
-const TRY_SEASONS = [NOW_YEAR, NOW_YEAR-1];
+const TRY_SEASONS = [NOW_YEAR, NOW_YEAR - 1];
 
 const playerWeekUrl = (season) =>
   `https://github.com/nflverse/nflverse-data/releases/download/player_stats/stats_player_week_${season}.csv`;
@@ -57,14 +104,14 @@ function pprRow(r){
   return pts;
 }
 function weightedProj(points){
-  if (!points.length) return 0;
+  if(!points.length) return 0;
   const last = points.slice(-3);
-  if (last.length === 1) return fmtNum(last[0]);
-  if (last.length === 2) return fmtNum(last[1]*0.3 + last[0]*0.7);
+  if(last.length === 1) return fmtNum(last[0]);
+  if(last.length === 2) return fmtNum(last[1]*0.3 + last[0]*0.7);
   return fmtNum(last[2]*0.2 + last[1]*0.3 + last[0]*0.5);
 }
 function seasonAvg(points){
-  if (!points.length) return 0;
+  if(!points.length) return 0;
   return fmtNum(points.reduce((a,b)=>a+b,0)/points.length);
 }
 function salaryFromProj(pos, proj){
@@ -82,34 +129,34 @@ function salaryFromProj(pos, proj){
 function buildOffense(rows){
   const byId = new Map();
   for(const r of rows){
-    const pos=(r.position||r.pos||"").toUpperCase();
+    const pos = (r.position || r.pos || "").toUpperCase();
     if(!["QB","RB","WR","TE"].includes(pos)) continue;
     const pid = r.player_id || r.gsis_id || r.pfr_player_id || r.pfr_id ||
-                `${r.player_name}_${pos}_${r.recent_team||r.team}`;
-    if(!byId.has(pid)) byId.set(pid,[]);
+                `${r.player_name}_${pos}_${r.recent_team || r.team}`;
+    if(!byId.has(pid)) byId.set(pid, []);
     byId.get(pid).push(r);
   }
-  const out=[];
-  for(const [pid,list] of byId.entries()){
-    list.sort((a,b)=> n(a.week)-n(b.week) );
+  const out = [];
+  for(const [pid, list] of byId.entries()){
+    list.sort((a,b)=> n(a.week)-n(b.week));
     const pts = list.map(pprRow);
     let proj = weightedProj(pts);
-    if (proj === 0) proj = seasonAvg(pts);
+    if(proj === 0) proj = seasonAvg(pts);
     const latest = list[list.length-1];
     const name = latest.player_name || latest.name || latest.player || "Unknown";
     const team = (latest.recent_team || latest.team || latest.posteam || "").toUpperCase();
     const pos  = (latest.position || latest.pos || "").toUpperCase();
-    if (!name || !pos) continue;
-    out.push({ id:pid, name, team: team||"FA", pos, proj, salary: salaryFromProj(pos, proj) });
+    if(!name || !pos) continue;
+    out.push({ id:pid, name, team: team || "FA", pos, proj, salary: salaryFromProj(pos, proj) });
   }
   return out;
 }
 function buildDST(rows){
   const byTeam = new Map();
   for(const r of rows){
-    const team=(r.team||r.recent_team||r.posteam||r.defteam||"").toUpperCase();
+    const team = (r.team || r.recent_team || r.posteam || r.defteam || "").toUpperCase();
     if(!team || team.length>3) continue;
-    if(!byTeam.has(team)) byTeam.set(team,[]);
+    if(!byTeam.has(team)) byTeam.set(team, []);
     byTeam.get(team).push(r);
   }
   const pointsAllowedToDST=(pa)=>{
@@ -121,9 +168,9 @@ function buildDST(rows){
     if(pa<=34) return -1;
     return -4;
   };
-  const out=[];
-  for(const [team,list] of byTeam.entries()){
-    list.sort((a,b)=> n(a.week)-n(b.week) );
+  const out = [];
+  for(const [team, list] of byTeam.entries()){
+    list.sort((a,b)=> n(a.week)-n(b.week));
     const pts = list.map(r=>{
       const sacks   = n(r.defense_sacks || r.sacks);
       const ints    = n(r.defense_interceptions || r.interceptions);
@@ -134,112 +181,58 @@ function buildDST(rows){
       return sacks*1 + ints*2 + fumRec*2 + tds*6 + safeties*2 + pointsAllowedToDST(pa);
     });
     let proj = weightedProj(pts);
-    if (proj === 0) proj = seasonAvg(pts);
+    if(proj === 0) proj = seasonAvg(pts);
     out.push({ id:`DST_${team}`, name:`${team} D/ST`, team, pos:"DST", proj, salary: salaryFromProj("DST", proj) });
   }
   return out;
 }
 async function fetchSeason(season){
-  const [pRes,tRes] = await Promise.all([
-    fetch(playerWeekUrl(season), { headers:{ "User-Agent":"fantasy-sim/1.0" } }),
-    fetch(teamWeekUrl(season),   { headers:{ "User-Agent":"fantasy-sim/1.0" } }),
+  const [pRes, tRes] = await Promise.all([
+    fetch(playerWeekUrl(season), { headers: { "User-Agent":"fantasy-sim/1.0" } }),
+    fetch(teamWeekUrl(season),   { headers: { "User-Agent":"fantasy-sim/1.0" } })
   ]);
   if(!pRes.ok) throw new Error(`players ${season}: HTTP ${pRes.status}`);
   if(!tRes.ok) throw new Error(`teams ${season}: HTTP ${tRes.status}`);
-  const [pText,tText] = await Promise.all([pRes.text(), tRes.text()]);
+  const [pText, tText] = await Promise.all([pRes.text(), tRes.text()]);
   const pParsed = Papa.parse(pText, { header:true, skipEmptyLines:true });
   const tParsed = Papa.parse(tText, { header:true, skipEmptyLines:true });
   const offense = buildOffense(pParsed.data || []);
   const dst     = buildDST(tParsed.data || []);
-  const all     = [...offense, ...dst].filter(p=>p.name&&p.pos);
+  const all     = [...offense, ...dst].filter(p=>p.name && p.pos);
   return { players: all, count: all.length, source: `nflverse ${season}` };
 }
 async function refreshNflverse(){
-  const tries=[];
-  for(const season of TRY_SEASONS){
+  const tries = [];
+  for(const s of TRY_SEASONS){
     try{
-      const { players, count, source } = await fetchSeason(season);
-      if(!count){ tries.push(`${season}: 0 players`); continue; }
+      const { players, count, source } = await fetchSeason(s);
+      if(!count){ tries.push(`${s}: 0 players`); continue; }
       PLAYERS = players;
       LAST_REFRESH = new Date().toISOString();
       LAST_SOURCE  = source;
-      return { ok:true, season, count, source };
-    }catch(e){ tries.push(`${season}: ${e.message}`); }
+      return { ok:true, season:s, count, source };
+    }catch(e){ tries.push(`${s}: ${e.message}`); }
   }
   throw new Error(tries.join(" | "));
 }
 
-// ---------- DraftKings loader ----------
-function parseDKCsvToPlayers(csvText){
-  const parsed = Papa.parse(csvText, { header:true, skipEmptyLines:true });
-  const rows = parsed.data || [];
-  const players = [];
-
-  for (const r of rows){
-    const posRaw   = trim(r.Position || r["Roster Position"] || r["Roster Positions"] || r["RosterPosition"]);
-    const pos      = posRaw.split(/[\/,]/)[0].toUpperCase();
-    const id       = trim(r.ID || r["Player ID"] || r["DraftKings ID"] || r["ID"]);
-    const name     = trim(r.Name || r["Player Name"] || "");
-    const team     = trim(r.TeamAbbrev || r.Team || r["Team Abbrev"] || "");
-    const salary   = n(r.Salary || r["DK Salary"] || r["Salary (DK)"]);
-    const proj     = n(r.AvgPointsPerGame || r["Avg Points/GM"] || r.Projection || r.Proj || r.FPPG);
-
-    if (!name || !pos || !salary) continue;
-    const display = pos === "DST" ? `${team || name} D/ST` : name;
-
-    players.push({
-      id: id || `${name}_${team}_${pos}`,
-      name: display,
-      team: team.toUpperCase(),
-      pos,
-      salary,
-      proj
-    });
-  }
-  // de-dupe best projection per id
-  const map = new Map();
-  for (const p of players) {
-    if (!map.has(p.id) || (p.proj||0) > (map.get(p.id).proj||0)) map.set(p.id,p);
-  }
-  return Array.from(map.values());
-}
-
-async function loadDKFromUrl(url){
-  const resp = await fetch(url, { headers:{ "User-Agent":"fantasy-sim/1.0" }});
-  if(!resp.ok) throw new Error(`DK CSV fetch failed: HTTP ${resp.status}`);
-  const csvText = await resp.text();
-  const players = parseDKCsvToPlayers(csvText);
-  if (!players.length) throw new Error("No players in DK CSV (or unexpected headers)");
-  PLAYERS = players;
-  LAST_REFRESH = new Date().toISOString();
-  LAST_SOURCE  = "draftkings";
-  return { ok:true, count: players.length, source: LAST_SOURCE };
-}
-
-// ---------- Ensure data ----------
+// ---------- Auto ensure data ----------
 async function ensureFresh(){
-  if (!PLAYERS.length) {
-    try {
-      if (DK_SALARIES_URL) {
-        await loadDKFromUrl(DK_SALARIES_URL);
-      } else {
-        await refreshNflverse();
-      }
-    } catch (e) {
-      // leave PLAYERS empty; frontend will show error
+  if(!PLAYERS.length){
+    try{
+      if(DK_SALARIES_URL) await loadDKFromUrl(DK_SALARIES_URL);
+      else await refreshNflverse();
+    }catch(e){
       LAST_REFRESH = new Date().toISOString();
-      LAST_SOURCE  = "empty";
+      LAST_SOURCE = "empty";
     }
     return;
   }
-  if (Date.now() - Date.parse(LAST_REFRESH || 0) > REFRESH_MS) {
-    try {
-      if (LAST_SOURCE === "draftkings" && DK_SALARIES_URL) {
-        await loadDKFromUrl(DK_SALARIES_URL);
-      } else {
-        await refreshNflverse();
-      }
-    } catch { /* keep old */ }
+  if(Date.now() - Date.parse(LAST_REFRESH || 0) > REFRESH_MS){
+    try{
+      if(LAST_SOURCE === "draftkings" && DK_SALARIES_URL) await loadDKFromUrl(DK_SALARIES_URL);
+      else await refreshNflverse();
+    }catch{/* keep old */}
   }
 }
 setInterval(()=>{ ensureFresh().catch(()=>{}); }, 30*60*1000);
@@ -249,7 +242,7 @@ ensureFresh().catch(()=>{});
 function optimizeWithRules(players, salaryCap=50000, noise=0){
   const noisy = players.map(p => ({ ...p, projAdj: p.proj + (noise ? rnd(-noise, noise) : 0) }));
   const byPos = { QB:[], RB:[], WR:[], TE:[], DST:[] };
-  for(const p of noisy) if (byPos[p.pos]) byPos[p.pos].push(p);
+  for(const p of noisy) if(byPos[p.pos]) byPos[p.pos].push(p);
 
   for(const k of Object.keys(byPos)){
     byPos[k].sort((a,b)=>{
@@ -260,15 +253,13 @@ function optimizeWithRules(players, salaryCap=50000, noise=0){
     });
   }
 
-  // Heuristic stack: QB + 1–2 pass-catchers same team, avoid DST conflicts
   const qbList = byPos.QB.slice(0,15);
   let best = null;
 
-  for (const qb of qbList){
+  for(const qb of qbList){
     const sameTeamREC = [...(byPos.WR||[]), ...(byPos.TE||[])].filter(x=>x.team===qb.team);
-    if (!sameTeamREC.length) continue;
+    if(!sameTeamREC.length) continue;
 
-    // candidate stacks: single or double
     const stacks=[];
     sameTeamREC.slice(0,6).forEach(a => stacks.push([a]));
     for(const a of sameTeamREC.slice(0,4)){
@@ -281,11 +272,10 @@ function optimizeWithRules(players, salaryCap=50000, noise=0){
       const taken = new Set([qb.id, ...stack.map(s=>s.id)]);
       let lineup = [qb, ...stack];
       let used   = lineup.reduce((s,p)=>s+p.salary,0);
-      if (used > salaryCap) continue;
+      if(used > salaryCap) continue;
 
-      // DST not on any offensive team
       const dst = (byPos.DST||[]).find(d => !lineup.some(o => o.team === d.team));
-      if (!dst || used + dst.salary > salaryCap) continue;
+      if(!dst || used + dst.salary > salaryCap) continue;
       lineup.push(dst); taken.add(dst.id); used += dst.salary;
 
       const need = { QB:1, RB:2, WR:3, TE:1, FLEX:1, DST:1 };
@@ -293,10 +283,10 @@ function optimizeWithRules(players, salaryCap=50000, noise=0){
 
       function addBest(list, count){
         for(const p of list){
-          if (!count) break;
-          if (taken.has(p.id)) continue;
-          if (p.team === dst.team) continue;
-          if (used + p.salary > salaryCap) continue;
+          if(!count) break;
+          if(taken.has(p.id)) continue;
+          if(p.team === dst.team) continue;
+          if(used + p.salary > salaryCap) continue;
           lineup.push(p); taken.add(p.id); used += p.salary; count--;
         }
         return count;
@@ -306,16 +296,16 @@ function optimizeWithRules(players, salaryCap=50000, noise=0){
       rbNeed = addBest(byPos.RB||[], rbNeed);
       wrNeed = addBest(byPos.WR||[], wrNeed);
       teNeed = addBest(byPos.TE||[], teNeed);
-      if (rbNeed>0 || wrNeed>0 || teNeed>0) continue;
+      if(rbNeed>0 || wrNeed>0 || teNeed>0) continue;
 
       const flexPool = [...(byPos.RB||[]), ...(byPos.WR||[]), ...(byPos.TE||[])]
         .filter(p => !taken.has(p.id) && p.team !== dst.team);
       for(const p of flexPool){
-        if (!need.FLEX) break;
-        if (used + p.salary > salaryCap) continue;
+        if(!need.FLEX) break;
+        if(used + p.salary > salaryCap) continue;
         lineup.push(p); taken.add(p.id); used += p.salary; need.FLEX--;
       }
-      if (lineup.length !== 9) continue;
+      if(lineup.length !== 9) continue;
 
       const proj = fmtNum(lineup.reduce((s,p)=>s+(p.projAdj||p.proj||0),0));
       const candidate = {
@@ -324,7 +314,7 @@ function optimizeWithRules(players, salaryCap=50000, noise=0){
         totalProj: proj,
         lineup: lineup.map(({projAdj, ...rest})=>rest)
       };
-      if (!best || candidate.totalProj > best.totalProj) best = candidate;
+      if(!best || candidate.totalProj > best.totalProj) best = candidate;
     }
   }
   return best;
@@ -335,11 +325,11 @@ function generateLineups(players, { salaryCap=50000, count=20, noise=1.2 } = {})
   let tries=0, maxTries=count*12;
   while(out.length<count && tries<maxTries){
     tries++;
-    const n = noise*(0.6+Math.random()*0.8);
-    const res = optimizeWithRules(players, salaryCap, n);
-    if (!res || !res.lineup || res.lineup.length!==9) continue;
+    const nsz = noise*(0.6+Math.random()*0.8);
+    const res = optimizeWithRules(players, salaryCap, nsz);
+    if(!res || !res.lineup || res.lineup.length!==9) continue;
     const key = uniqueKey(res.lineup);
-    if (seen.has(key)) continue;
+    if(seen.has(key)) continue;
     seen.add(key); out.push(res);
   }
   out.sort((a,b)=> (b.totalProj - a.totalProj) || (a.usedSalary - b.usedSalary));
@@ -350,7 +340,13 @@ function generateLineups(players, { salaryCap=50000, count=20, noise=1.2 } = {})
 app.get("/", (_req,res)=> res.redirect("/api/health"));
 
 app.get("/api/health", (_req,res)=>{
-  res.json({ ok:true, players: PLAYERS.length, lastRefresh: LAST_REFRESH, source: LAST_SOURCE, time: new Date().toISOString() });
+  res.json({
+    ok:true,
+    players: PLAYERS.length,
+    lastRefresh: LAST_REFRESH,
+    source: LAST_SOURCE,
+    time: new Date().toISOString()
+  });
 });
 
 app.get("/api/players", async (_req,res)=>{
@@ -364,8 +360,10 @@ app.post("/api/lineups/optimize", async (req,res)=>{
   const cap   = Number(req.body?.constraints?.salaryCap ?? 50000);
   const count = Number(req.body?.constraints?.numLineups ?? req.body?.count ?? 1);
   const noise = Number(req.body?.constraints?.noise ?? 1.2);
-  if (!PLAYERS.length) return res.json({ lineups: [], salaryCap: cap, error: "No players loaded" });
-  if (count <= 1){
+
+  if(!PLAYERS.length) return res.json({ lineups: [], salaryCap: cap, error: "No players loaded" });
+
+  if(count <= 1){
     const one = optimizeWithRules(PLAYERS, cap, noise);
     return res.json(one || { error:"Could not build a lineup. Check player pool." });
   }
@@ -377,7 +375,7 @@ app.post("/api/lineups/optimize", async (req,res)=>{
 app.post("/api/optimize", async (req,res)=>{
   try{ await ensureFresh(); }catch{}
   const cap = Number(req.body?.salaryCap ?? 50000);
-  if (!PLAYERS.length) return res.json({ error:"No players loaded" });
+  if(!PLAYERS.length) return res.json({ error:"No players loaded" });
   const one = optimizeWithRules(PLAYERS, cap, 1.0);
   res.json(one || { error:"Could not build a lineup. Check player pool." });
 });
@@ -385,7 +383,7 @@ app.post("/api/optimize", async (req,res)=>{
 // admin: refresh nflverse
 app.post("/api/admin/refresh", async (req,res)=>{
   const token = req.headers["x-admin-token"] || req.query.token || "";
-  if (token !== ADMIN_TOKEN) return res.status(401).json({ error:"Unauthorized" });
+  if(token !== ADMIN_TOKEN) return res.status(401).json({ error:"Unauthorized" });
   try{
     const info = await refreshNflverse();
     res.json({ ok:true, ...info });
@@ -394,17 +392,28 @@ app.post("/api/admin/refresh", async (req,res)=>{
   }
 });
 
-// admin: load DK CSV
+// admin: DK loader (CSV OR URL)
 app.post("/api/admin/dk", async (req,res)=>{
   const token = req.headers["x-admin-token"] || "";
-  if (token !== ADMIN_TOKEN) return res.status(401).json({ error:"Unauthorized" });
+  if(token !== ADMIN_TOKEN) return res.status(401).json({ error:"Unauthorized" });
 
-  const url = trim(req.body?.url);
-  if (!url) return res.status(400).json({ error:"Missing 'url' in body" });
+  const rawCsv = trim(req.body?.csv || "");
+  const url    = trim(req.body?.url || "");
 
   try{
-    const info = await loadDKFromUrl(url);
-    res.json(info);
+    if(rawCsv){
+      const players = parseDKCsvToPlayers(rawCsv);
+      if(!players.length) throw new Error("No players in CSV");
+      PLAYERS = players;
+      LAST_REFRESH = new Date().toISOString();
+      LAST_SOURCE  = "draftkings";
+      return res.json({ ok:true, count: PLAYERS.length, source: LAST_SOURCE });
+    }
+    if(url){
+      const info = await loadDKFromUrl(url);
+      return res.json(info);
+    }
+    return res.status(400).json({ error:"Provide either { csv } or { url }" });
   }catch(e){
     res.status(500).json({ error:String(e.message||e) });
   }
