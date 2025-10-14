@@ -1,97 +1,104 @@
 // backend/server.js
-// Fantasy Sim backend — DK CSV upload/URL + nflverse fallback + MULTI-SPORT (NFL + NBA)
-// Stochastic multi-lineup generator with noise, temperature, minDiff, maxPerTeam.
+// Fantasy Sim backend — NFL + NBA, DK CSV upload/URL, nflverse fallback (NFL),
+// stochastic multi-lineup generator with strict slot filling (no 2 QBs).
+//
+// ENV:
+//   PORT
+//   ADMIN_TOKEN            (default "Truetrenddfs4u!")
+//   CORS_ORIGIN            (default "*")
+//   DK_SALARIES_URL        (optional public CSV to auto-load on boot)
 
 const express = require("express");
 const cors = require("cors");
 const Papa = require("papaparse");
 
-// ---------- Config ----------
+// ----------------- Config -----------------
 const PORT            = process.env.PORT || 5000;
 const ADMIN_TOKEN     = process.env.ADMIN_TOKEN || "Truetrenddfs4u!";
 const CORS_ORIGIN     = process.env.CORS_ORIGIN || "*";
-const DK_SALARIES_URL = process.env.DK_SALARIES_URL || ""; // optional public CSV
-const REFRESH_MS      = 6 * 60 * 60 * 1000; // 6h
+const DK_SALARIES_URL = process.env.DK_SALARIES_URL || "";
+const REFRESH_MS      = 6 * 60 * 60 * 1000; // 6 hours
 
-// ---------- App ----------
+// ----------------- App --------------------
 const app = express();
 app.use(cors({ origin: CORS_ORIGIN }));
-app.use(express.json({ limit: "20mb" })); // allow big CSV bodies
+app.use(express.json({ limit: "20mb" }));
 
-// ---------- State ----------
-let PLAYERS = []; // {id,name,team,pos,proj,salary, sport}
+// ----------------- State ------------------
+let PLAYERS = [];         // {id,name,team,pos,proj,salary,sport}
 let LAST_REFRESH = null;
 let LAST_SOURCE  = null;
-let CURRENT_SPORT = "NFL"; // "NFL" | "NBA" (auto-detected on DK load)
+let CURRENT_SPORT = "NFL";
 
-// ---------- Helpers ----------
+// ----------------- Utils ------------------
 const n = (v) => (v === null || v === undefined || v === "" ? 0 : Number(v) || 0);
 const trim = (s) => (s || "").toString().trim();
-const rnd = (min, max) => min + Math.random() * (max - min);
 const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
-const fmt = (x, d=2) => Number((x ?? 0).toFixed(d));
-const uniqKey = (lineup) => lineup.map(p=>p.id).sort().join("|");
-const hamming = (A,B) => {
+const rnd = (a, b) => a + Math.random() * (b - a);
+const fmt = (x, d = 2) => Number((x ?? 0).toFixed(d));
+const uniqKey = (lineup) => lineup.map(p => p.id).sort().join("|");
+const symDiffSize = (A, B) => {
   const a = new Set(A.map(p=>p.id)); let overlap=0;
-  for(const p of B) if(a.has(p.id)) overlap++;
-  return A.length + B.length - 2*overlap; // size-based symmetric diff
+  for (const p of B) if (a.has(p.id)) overlap++;
+  return A.length + B.length - 2 * overlap;
 };
 
-// ---------- SPORT CONFIG ----------
+// ----------------- SPORT CONFIG -----------
 const ROSTERS = {
   NFL: {
     cap: 50000,
+    // FLEX is strictly RB/WR/TE — no QB in FLEX
     slots: [
-      { name:"QB",   allow:["QB"] },
-      { name:"RB1",  allow:["RB"] },
-      { name:"RB2",  allow:["RB"] },
-      { name:"WR1",  allow:["WR"] },
-      { name:"WR2",  allow:["WR"] },
-      { name:"WR3",  allow:["WR"] },
-      { name:"TE",   allow:["TE"] },
-      { name:"FLEX", allow:["RB","WR","TE"] },
-      { name:"DST",  allow:["DST"] },
+      { name: "QB",   allow: ["QB"] },
+      { name: "RB1",  allow: ["RB"] },
+      { name: "RB2",  allow: ["RB"] },
+      { name: "WR1",  allow: ["WR"] },
+      { name: "WR2",  allow: ["WR"] },
+      { name: "WR3",  allow: ["WR"] },
+      { name: "TE",   allow: ["TE"] },
+      { name: "FLEX", allow: ["RB", "WR", "TE"] },
+      { name: "DST",  allow: ["DST"] },
     ],
-    stack: { needQBStack: true, minReceivers: 1, maxReceivers: 2 }, // WR/TE from QB team
+    // Optional constraints
+    stack: { needQBStack: true, minReceivers: 1, maxReceivers: 2 },
     avoidDstConflict: true,
     defaultMaxPerTeam: 3,
   },
   NBA: {
-    cap: 50000, // DK classic
+    cap: 50000, // DK Classic
     slots: [
-      { name:"PG",   allow:["PG"] },
-      { name:"SG",   allow:["SG"] },
-      { name:"SF",   allow:["SF"] },
-      { name:"PF",   allow:["PF"] },
-      { name:"C",    allow:["C"]  },
-      { name:"G",    allow:["PG","SG"] },
-      { name:"F",    allow:["SF","PF"] },
-      { name:"UTIL", allow:["PG","SG","SF","PF","C"] },
+      { name: "PG",   allow: ["PG"] },
+      { name: "SG",   allow: ["SG"] },
+      { name: "SF",   allow: ["SF"] },
+      { name: "PF",   allow: ["PF"] },
+      { name: "C",    allow: ["C"] },
+      { name: "G",    allow: ["PG","SG"] },
+      { name: "F",    allow: ["SF","PF"] },
+      { name: "UTIL", allow: ["PG","SG","SF","PF","C"] },
     ],
-    stack: null, // no forced stacks for NBA
+    stack: null,
     avoidDstConflict: false,
     defaultMaxPerTeam: 3,
   }
 };
 
-// ---------- DK CSV parsing & sport detection ----------
-function detectSportFromPositions(posSet){
-  const hasNFL = posSet.has("QB") || posSet.has("RB") || posSet.has("WR") || posSet.has("TE") || posSet.has("DST");
-  const hasNBA = posSet.has("PG") || posSet.has("SG") || posSet.has("SF") || posSet.has("PF") || posSet.has("C") || posSet.has("UTIL") || posSet.has("G") || posSet.has("F");
-  if (hasNBA && !hasNFL) return "NBA";
-  if (hasNFL && !hasNBA) return "NFL";
-  // If mixed, prefer NBA when NBA-only slots present
-  if (hasNBA) return "NBA";
+// ----------------- DK CSV parsing ----------
+function detectSportFromPositions(posSet) {
+  const nfl = ["QB","RB","WR","TE","DST"].some(p => posSet.has(p));
+  const nba = ["PG","SG","SF","PF","C","G","F","UTIL"].some(p => posSet.has(p));
+  if (nba && !nfl) return "NBA";
+  if (nfl && !nba) return "NFL";
+  if (nba) return "NBA";
   return "NFL";
 }
 
-function parseDKCsvToPlayers(csvText){
+function parseDKCsvToPlayers(csvText) {
   const parsed = Papa.parse(csvText, { header: true, skipEmptyLines: true });
   const rows = parsed.data || [];
   const players = [];
   const posSet = new Set();
 
-  for(const r of rows){
+  for (const r of rows) {
     const posRaw = trim(r.Position || r["Roster Position"] || r["Roster Positions"] || r["RosterPosition"]);
     if (!posRaw) continue;
     const primary = posRaw.split(/[\/,]/)[0].toUpperCase();
@@ -105,7 +112,6 @@ function parseDKCsvToPlayers(csvText){
 
     if (!name || !primary || !salary) continue;
 
-    // Normalize DST naming on NFL slates later after sport detection.
     players.push({
       id: id || `${name}_${team}_${primary}`,
       name,
@@ -116,47 +122,44 @@ function parseDKCsvToPlayers(csvText){
     });
   }
 
-  // De-dupe best projection
+  // de-dupe prefer highest projection
   const map = new Map();
   for (const p of players) {
-    if (!map.has(p.id) || (p.proj||0) > (map.get(p.id).proj||0)) map.set(p.id, p);
+    if (!map.has(p.id) || (p.proj || 0) > (map.get(p.id).proj || 0)) map.set(p.id, p);
   }
   const list = Array.from(map.values());
 
-  // Infer sport & normalize if NFL/DST
   const sport = detectSportFromPositions(posSet);
   if (sport === "NFL") {
     for (const p of list) {
       if (p.pos === "DST") p.name = `${p.team || p.name} D/ST`;
     }
   }
-
-  return { players: list.map(p=>({ ...p, sport })), sport };
+  return { players: list.map(p => ({ ...p, sport })), sport };
 }
 
-async function loadDKFromUrl(url){
-  const resp = await fetch(url, { headers: { "User-Agent": "fantasy-sim/1.0" }});
-  if(!resp.ok) throw new Error(`DK CSV fetch failed: HTTP ${resp.status}`);
-  const csvText = await resp.text();
-  const { players, sport } = parseDKCsvToPlayers(csvText);
-  if(!players.length) throw new Error("No players in DK CSV (or unexpected headers)");
+async function loadDKFromUrl(url) {
+  const resp = await fetch(url, { headers: { "User-Agent": "fantasy-sim/1.0" } });
+  if (!resp.ok) throw new Error(`DK CSV fetch failed: HTTP ${resp.status}`);
+  const csv = await resp.text();
+  const { players, sport } = parseDKCsvToPlayers(csv);
+  if (!players.length) throw new Error("No players parsed from DK CSV");
   PLAYERS = players;
   CURRENT_SPORT = sport;
   LAST_REFRESH = new Date().toISOString();
   LAST_SOURCE = "draftkings";
-  return { ok: true, count: PLAYERS.length, source: LAST_SOURCE, sport: CURRENT_SPORT };
+  return { ok: true, count: PLAYERS.length, sport, source: LAST_SOURCE };
 }
 
-// ---------- nflverse fallback (NFL only) ----------
+// --------------- nflverse fallback (NFL only) ---------------
 const NOW_YEAR = new Date().getFullYear();
 const TRY_SEASONS = [NOW_YEAR, NOW_YEAR - 1];
-
 const playerWeekUrl = (season) =>
   `https://github.com/nflverse/nflverse-data/releases/download/player_stats/stats_player_week_${season}.csv`;
 const teamWeekUrl = (season) =>
   `https://github.com/nflverse/nflverse-data/releases/download/team_stats/stats_team_week_${season}.csv`;
 
-function pprRow(r){
+function pprRow(r) {
   const passY = n(r.passing_yards || r.pass_yds);
   const passT = n(r.passing_tds   || r.pass_td);
   const ints  = n(r.interceptions  || r.int);
@@ -173,18 +176,18 @@ function pprRow(r){
   pts -= fumL * 2;
   return pts;
 }
-function weightedProj(points){
-  if (!points.length) return 0;
-  const L = points.slice(-3);
+function weightedProj(arr) {
+  if (!arr.length) return 0;
+  const L = arr.slice(-3);
   if (L.length === 1) return fmt(L[0]);
   if (L.length === 2) return fmt(L[1]*0.3 + L[0]*0.7);
   return fmt(L[2]*0.2 + L[1]*0.3 + L[0]*0.5);
 }
-function seasonAvg(points){
-  if (!points.length) return 0;
-  return fmt(points.reduce((a,b)=>a+b,0)/points.length);
+function seasonAvg(arr) {
+  if (!arr.length) return 0;
+  return fmt(arr.reduce((a,b)=>a+b,0)/arr.length);
 }
-function salaryFromProj(pos, proj){
+function salaryFromProj(pos, proj) {
   let base;
   switch(pos){
     case "QB":  base = 2200 + 425*proj; break;
@@ -198,26 +201,26 @@ function salaryFromProj(pos, proj){
 }
 function buildOffense(rows){
   const byId = new Map();
-  for(const r of rows){
-    const pos=(r.position||r.pos||"").toUpperCase();
-    if(!["QB","RB","WR","TE"].includes(pos)) continue;
+  for (const r of rows) {
+    const pos = (r.position || r.pos || "").toUpperCase();
+    if (!["QB","RB","WR","TE"].includes(pos)) continue;
     const pid = r.player_id || r.gsis_id || r.pfr_player_id || r.pfr_id ||
-                `${r.player_name}_${pos}_${r.recent_team||r.team}`;
-    if(!byId.has(pid)) byId.set(pid,[]);
+                `${r.player_name}_${pos}_${r.recent_team || r.team}`;
+    if (!byId.has(pid)) byId.set(pid, []);
     byId.get(pid).push(r);
   }
-  const out=[];
-  for(const [pid,list] of byId.entries()){
+  const out = [];
+  for (const [pid, list] of byId.entries()) {
     list.sort((a,b)=> n(a.week)-n(b.week) );
     const pts = list.map(pprRow);
     let proj = weightedProj(pts);
     if (proj === 0) proj = seasonAvg(pts);
     const latest = list[list.length-1];
-    const name = latest.player_name || latest.name || latest.player || "Unknown";
+    const name = latest.player_name || latest.name || "Unknown";
     const team = (latest.recent_team || latest.team || latest.posteam || "").toUpperCase();
     const pos  = (latest.position || latest.pos || "").toUpperCase();
     if (!name || !pos) continue;
-    out.push({ id:pid, name, team: team||"FA", pos, proj, salary: salaryFromProj(pos, proj), sport:"NFL" });
+    out.push({ id:pid, name, team:team||"FA", pos, proj, salary: salaryFromProj(pos, proj), sport:"NFL" });
   }
   return out;
 }
@@ -229,7 +232,7 @@ function buildDST(rows){
     if(!byTeam.has(team)) byTeam.set(team,[]);
     byTeam.get(team).push(r);
   }
-  const pointsAllowedToDST=(pa)=>{
+  const pointsAllowedToDST = (pa)=>{
     if(pa===0) return 10;
     if(pa<=6)  return 7;
     if(pa<=13) return 4;
@@ -252,7 +255,7 @@ function buildDST(rows){
     });
     let proj = weightedProj(pts);
     if (proj === 0) proj = seasonAvg(pts);
-    out.push({ id:`DST_${team}`, name:`${team} D/ST`, team, pos:"DST", proj, salary: salaryFromProj("DST", proj), sport:"NFL" });
+    out.push({ id:`DST_${team}`, name:`${team} D/ST`, team, pos:"DST", proj, salary: salaryFromProj("DST",proj), sport:"NFL" });
   }
   return out;
 }
@@ -273,27 +276,27 @@ async function fetchSeason(season){
   return { players: all, count: all.length, source: `nflverse ${season}` };
 }
 async function refreshNflverse(){
-  const tries=[];
+  const errs=[];
   for(const season of TRY_SEASONS){
     try{
       const { players, count, source } = await fetchSeason(season);
-      if(!count){ tries.push(`${season}: 0 players`); continue; }
+      if(!count) { errs.push(`${season}: 0 players`); continue; }
       PLAYERS = players;
       CURRENT_SPORT = "NFL";
       LAST_REFRESH = new Date().toISOString();
       LAST_SOURCE  = source;
       return { ok:true, season, count, source, sport: CURRENT_SPORT };
-    }catch(e){ tries.push(`${season}: ${e.message}`); }
+    }catch(e){ errs.push(`${season}: ${e.message}`); }
   }
-  throw new Error(tries.join(" | "));
+  throw new Error(errs.join(" | "));
 }
 
-// ---------- Data freshness ----------
+// --------------- freshness ---------------
 async function ensureFresh(){
   if (!PLAYERS.length) {
     try {
       if (DK_SALARIES_URL) await loadDKFromUrl(DK_SALARIES_URL);
-      else await refreshNflverse(); // NFL-only fallback
+      else await refreshNflverse();
     } catch {
       LAST_REFRESH = new Date().toISOString();
       LAST_SOURCE = "empty";
@@ -304,179 +307,161 @@ async function ensureFresh(){
     try {
       if (LAST_SOURCE === "draftkings" && DK_SALARIES_URL) await loadDKFromUrl(DK_SALARIES_URL);
       else await refreshNflverse();
-    } catch { /* keep old */ }
+    } catch {/* keep previous pool */}
   }
 }
 setInterval(()=>{ ensureFresh().catch(()=>{}); }, 30*60*1000);
 ensureFresh().catch(()=>{});
 
-// ---------- Generic slot-based optimizer ----------
-function byPos(players){
-  const m = {};
-  for(const p of players){
-    if(!m[p.pos]) m[p.pos]=[];
-    m[p.pos].push(p);
-  }
-  return m;
-}
+// ----------------- Optimizer core -----------------
 function sortByValue(arr, temperature=0){
-  // value density + stochastic jitter controlled by temperature
+  // Value density with small randomized jitter
   return [...arr].sort((a,b)=>{
-    const va = (a.proj||0)/Math.max(1,a.salary||1) + (temperature ? rnd(-temperature, temperature)/1000 : 0);
-    const vb = (b.proj||0)/Math.max(1,b.salary||1) + (temperature ? rnd(-temperature, temperature)/1000 : 0);
+    const va = (a.projAdj)/Math.max(1,a.salary) + (temperature ? rnd(-temperature,temperature)/1000 : 0);
+    const vb = (b.projAdj)/Math.max(1,b.salary) + (temperature ? rnd(-temperature,temperature)/1000 : 0);
     if (vb !== va) return vb - va;
-    return (b.proj||0) - (a.proj||0);
+    return (b.projAdj - a.projAdj);
   });
 }
 
-function buildLineup(players, sportCfg, { salaryCap, noise=0, temperature=0, maxPerTeam, minTries=200 }){
-  const cap = salaryCap || sportCfg.cap;
-  const pools = byPos(players.map(p => ({ ...p, projAdj: p.proj + (noise ? rnd(-noise, noise) : 0) })));
-  const allPool = sortByValue(players.map(p => ({ ...p, projAdj: p.proj + (noise ? rnd(-noise, noise) : 0) })), temperature);
-  const dstTeams = new Set((pools.DST||[]).map(d=>d.team));
+function buildLineupStrict(players, rosterCfg, {
+  salaryCap,
+  noise = 1.0,
+  temperature = 0.6,
+  maxPerTeam = rosterCfg.defaultMaxPerTeam,
+  tries = 300
+} = {}){
+  const cap = salaryCap || rosterCfg.cap;
 
-  // Try multiple random-ish builds, keep the best that satisfies constraints
+  // Precompute jittered projections once per attempt batch for stability
   let best = null;
 
-  for(let attempt=0; attempt<minTries; attempt++){
-    const lineup = [];
+  for(let attempt=0; attempt<tries; attempt++){
+    const pool = players.map(p => ({ ...p, projAdj: p.proj + (noise ? rnd(-noise, noise) : 0) }));
+    const poolByPos = pool.reduce((m,p)=>{ (m[p.pos] ||= []).push(p); return m; }, {});
+    for(const pos in poolByPos) poolByPos[pos] = sortByValue(poolByPos[pos], temperature);
+
     const taken = new Set();
     const teamCount = {};
-
+    const lineup = [];
     let used = 0;
 
-    function canAdd(p){
+    function canAdd(p, addingPos){
       if (taken.has(p.id)) return false;
       if (used + p.salary > cap) return false;
-      const cnt = (teamCount[p.team] || 0) + 1;
+      const cnt = (teamCount[p.team]||0) + 1;
       if (maxPerTeam && cnt > maxPerTeam) return false;
-      // NFL only: avoid DST conflict (no offensive player from same DST team)
-      if (sportCfg.avoidDstConflict && p.pos !== "DST") {
-        if (lineup.some(x => x.pos==="DST" && x.team === p.team)) return false;
-      }
-      if (sportCfg.avoidDstConflict && p.pos === "DST") {
-        if (lineup.some(x => x.pos!=="DST" && x.team === p.team)) return false;
+
+      // NFL-only conflicts with DST
+      if (rosterCfg.avoidDstConflict){
+        if (addingPos === "DST"){
+          if (lineup.some(x => x.pos !== "DST" && x.team === p.team)) return false;
+        } else {
+          if (lineup.some(x => x.pos === "DST" && x.team === p.team)) return false;
+        }
       }
       return true;
     }
     function add(p){
-      lineup.push(p); taken.add(p.id); used += p.salary; teamCount[p.team] = (teamCount[p.team]||0) + 1;
+      taken.add(p.id);
+      teamCount[p.team] = (teamCount[p.team]||0) + 1;
+      lineup.push(p);
+      used += p.salary;
     }
 
-    // If NFL and stack is required: pick QB and 1-2 teammates first
-    if (sportCfg.stack?.needQBStack) {
-      const qbs = sortByValue(pools.QB||[], temperature).slice(0,12);
-      const qb = qbs[Math.floor(Math.random()*Math.max(1,qbs.length))];
-      if (!qb || !canAdd(qb)) continue;
-      add(qb);
-
-      const recPool = [...(pools.WR||[]), ...(pools.TE||[])].filter(x => x.team === qb.team);
-      const recSorted = sortByValue(recPool, temperature);
-      let added=0;
-      for(const r of recSorted){
-        if (added >= sportCfg.stack.maxReceivers) break;
-        if (canAdd(r)) { add(r); added++; if (added >= sportCfg.stack.minReceivers) break; }
-      }
-      if (added < sportCfg.stack.minReceivers) continue;
-
-      // DST pick (avoid QB/stack team)
-      const dstSorted = sortByValue(pools.DST||[], temperature);
-      const dst = dstSorted.find(d => canAdd(d));
-      if (!dst) continue;
-      add(dst);
-    }
-
-    // Fill remaining slots generically against allowed positions list
-    for (const slot of sportCfg.slots) {
-      // Skip if already satisfied (e.g., we added QB, a WR, and DST above)
-      const have = lineup.filter(p => slot.allow.includes(p.pos)).length;
-      if (have >= 1 && !["RB2","WR2","WR3"].includes(slot.name)) continue;
-
+    // Fill each slot strictly by allowed positions.
+    for (const slot of rosterCfg.slots) {
       const allowed = slot.allow;
-      const candidates = sortByValue(allPool.filter(p => allowed.includes(p.pos) && !taken.has(p.id)), temperature);
-      const pick = candidates.find(p => canAdd(p));
-      if (!pick) { /* fail this attempt */ best = best; continue; } // we'll evaluate final size later
+
+      // merged candidate list for this slot
+      let cands = [];
+      for (const pos of allowed) {
+        if (poolByPos[pos]) cands = cands.concat(poolByPos[pos].filter(x=>!taken.has(x.id)));
+      }
+      // small random pick from top K to diversify
+      const K = Math.max(5, Math.ceil(cands.length * 0.15));
+      cands = cands.slice(0, K);
+
+      const pick = cands.find(p => canAdd(p, allowed.length===1 ? allowed[0] : p.pos));
+      if (!pick) { // fail this attempt
+        // try a bit more: widen to top 25%
+        let more = [];
+        for (const pos of allowed) {
+          if (poolByPos[pos]) more = more.concat(poolByPos[pos].filter(x=>!taken.has(x.id)));
+        }
+        more = more.slice(0, Math.max(K, Math.ceil(more.length*0.25)));
+        const alt = more.find(p => canAdd(p, allowed.length===1 ? allowed[0] : p.pos));
+        if (!alt) { lineup.length = 0; break; } // give up this attempt
+        add(alt);
+        continue;
+      }
       add(pick);
     }
 
-    // If we don’t have the right number of players yet, try to fill from best available
-    while (lineup.length < sportCfg.slots.length) {
-      const candidates = sortByValue(allPool.filter(p => !taken.has(p.id)), temperature);
-      const pick = candidates.find(p => canAdd(p));
-      if (!pick) break;
-      add(pick);
+    if (lineup.length !== rosterCfg.slots.length) continue;
+
+    // NFL stack requirement: at least minReceivers WR/TE on same team as QB
+    if (rosterCfg.stack?.needQBStack) {
+      const qb = lineup.find(p => p.pos === "QB");
+      if (!qb) continue;
+      const recs = lineup.filter(p => (p.pos === "WR" || p.pos === "TE") && p.team === qb.team);
+      if (recs.length < (rosterCfg.stack.minReceivers || 1)) continue;
     }
 
-    if (lineup.length !== sportCfg.slots.length) continue;
-
-    // NFL stack validation
-    if (sportCfg.stack?.needQBStack) {
-      const qb = lineup.find(p=>p.pos==="QB");
-      const recs = lineup.filter(p=>(p.pos==="WR"||p.pos==="TE") && p.team===qb.team);
-      if (!qb || recs.length < sportCfg.stack.minReceivers) continue;
-    }
-
-    // Score
-    const totalProj = fmt(lineup.reduce((s,p)=>s+(p.projAdj||p.proj||0),0));
+    const totalProj = fmt(lineup.reduce((s,p)=> s + (p.projAdj || p.proj || 0), 0));
     const candidate = { usedSalary: used, totalProj, lineup: lineup.map(({projAdj, ...rest})=>rest) };
-    if (!best || candidate.totalProj > best.totalProj || (candidate.totalProj===best.totalProj && candidate.usedSalary<best.usedSalary)) {
+    if (!best || candidate.totalProj > best.totalProj || (candidate.totalProj===best.totalProj && candidate.usedSalary<best.usedSalary)){
       best = candidate;
     }
   }
-
   return best;
 }
 
-function generateLineups(players, sportCfg, {
+function generateLineups(players, rosterCfg, {
   salaryCap,
-  count=20,
-  noise=1.2,
-  temperature=0.6,
-  maxPerTeam,
-  minDiff=4,        // minimum symmetric difference vs. any kept lineup
-  triesPerLineup=300
+  count = 20,
+  noise = 1.2,
+  temperature = 0.6,
+  maxPerTeam = rosterCfg.defaultMaxPerTeam,
+  minDiff = (rosterCfg === ROSTERS.NFL ? 4 : 3),
+  triesPerLineup = 300
 } = {}){
-  const out=[]; const seen=new Set();
+  const out = [];
+  const seen = new Set();
 
   while (out.length < count) {
-    const cand = buildLineup(players, sportCfg, {
-      salaryCap,
-      noise,
-      temperature,
-      maxPerTeam,
-      minTries: triesPerLineup
-    });
-    if (!cand || !cand.lineup) break;
+    const cand = buildLineupStrict(players, rosterCfg, { salaryCap, noise, temperature, maxPerTeam, tries: triesPerLineup });
+    if (!cand) break;
 
-    // uniqueness gate
+    // diversity & duplicate check
     let unique = true;
     for (const L of out) {
-      if (hamming(L.lineup, cand.lineup) < minDiff) { unique = false; break; }
+      if (symDiffSize(L.lineup, cand.lineup) < minDiff) { unique = false; break; }
     }
     const key = uniqKey(cand.lineup);
     if (seen.has(key)) unique = false;
 
-    if (unique) { out.push(cand); seen.add(key); }
-    else {
-      // small tweak to search space if duplicate-ish
-      noise = noise * 1.01;
-      temperature = temperature * 1.02;
+    if (unique) {
+      out.push(cand);
+      seen.add(key);
+    } else {
+      // slightly increase randomness to search new space
+      noise *= 1.02;
+      temperature *= 1.02;
     }
-    if (out.length >= count) break;
-    if (out.length === 0 && noise < 2.5) { noise += 0.05; } // expand search for tough slates
+    if (out.length === 0 && noise < 2.5) noise += 0.05;
   }
 
-  // Order: best projection, then lower salary
   out.sort((a,b)=> (b.totalProj - a.totalProj) || (a.usedSalary - b.usedSalary));
   return out;
 }
 
-// ---------- Routes ----------
+// ----------------- Routes -----------------
 app.get("/", (_req,res)=> res.redirect("/api/health"));
 
 app.get("/api/health", (_req,res)=>{
   res.json({
-    ok:true,
+    ok: true,
     players: PLAYERS.length,
     lastRefresh: LAST_REFRESH,
     source: LAST_SOURCE,
@@ -486,63 +471,63 @@ app.get("/api/health", (_req,res)=>{
 });
 
 app.get("/api/players", async (_req,res)=>{
-  try{ await ensureFresh(); res.json({ players: PLAYERS, sport: CURRENT_SPORT }); }
+  try { await ensureFresh(); res.json({ players: PLAYERS, sport: CURRENT_SPORT }); }
   catch(e){ res.status(500).json({ error:String(e.message||e) }); }
 });
 
-// Multi-lineup (SPORT-AWARE)
+// Multi-lineup, SPORT-AWARE
 app.post("/api/lineups/optimize", async (req,res)=>{
-  try{ await ensureFresh(); }catch{}
+  try { await ensureFresh(); } catch {}
   const body = req.body || {};
-  const constraints = body.constraints || {};
+  const c = body.constraints || {};
 
-  // Allow forcing sport from the request; otherwise use current.
-  const sport = (constraints.sport || CURRENT_SPORT || "NFL").toUpperCase();
+  const sport = (c.sport || CURRENT_SPORT || "NFL").toUpperCase();
   const roster = ROSTERS[sport] || ROSTERS.NFL;
 
-  const cap         = Number(constraints.salaryCap ?? roster.cap);
-  const count       = Number(constraints.numLineups ?? body.count ?? 1);
-  const noise       = Number(constraints.noise ?? 1.2);
-  const temperature = Number(constraints.temperature ?? 0.6);
-  const maxPerTeam  = Number(constraints.maxPerTeam ?? roster.defaultMaxPerTeam);
-  const minDiff     = Number(constraints.minDiff ?? (sport === "NFL" ? 4 : 3));
-  const triesPer    = Number(constraints.triesPerLineup ?? 300);
+  const salaryCap    = Number(c.salaryCap ?? roster.cap);
+  const count        = Number(c.numLineups ?? body.count ?? 1);
+  const noise        = Number(c.noise ?? 1.2);
+  const temperature  = Number(c.temperature ?? 0.6);
+  const maxPerTeam   = Number(c.maxPerTeam ?? roster.defaultMaxPerTeam);
+  const minDiff      = Number(c.minDiff ?? (sport === "NFL" ? 4 : 3));
+  const triesPerLineup = Number(c.triesPerLineup ?? 300);
 
   const pool = PLAYERS.filter(p => (p.sport || CURRENT_SPORT) === sport);
-  if (!pool.length) return res.json({ salaryCap: cap, count: 0, lineups: [], sport, error: "No players loaded for this sport" });
+  if (!pool.length) return res.json({ salaryCap, count:0, lineups:[], sport, error:"No players loaded for this sport" });
 
-  if (count <= 1){
-    const one = buildLineup(pool, roster, { salaryCap: cap, noise, temperature, maxPerTeam, minTries: triesPer });
-    return res.json(one || { error:"Could not build a lineup. Check player pool/constraints." });
+  if (count <= 1) {
+    const one = buildLineupStrict(pool, roster, { salaryCap, noise, temperature, maxPerTeam, tries: triesPerLineup });
+    return res.json(one || { error:"Could not build a lineup. Check pool/constraints." });
   }
-  const many = generateLineups(pool, roster, { salaryCap: cap, count, noise, temperature, maxPerTeam, minDiff, triesPerLineup: triesPer });
-  res.json({ salaryCap: cap, count: many.length, lineups: many, sport });
+
+  const many = generateLineups(pool, roster, { salaryCap, count, noise, temperature, maxPerTeam, minDiff, triesPerLineup });
+  res.json({ salaryCap, count: many.length, lineups: many, sport });
 });
 
-// Legacy single (kept for compatibility)
+// Legacy single lineup (kept for compatibility)
 app.post("/api/optimize", async (req,res)=>{
-  try{ await ensureFresh(); }catch{}
+  try { await ensureFresh(); } catch {}
   const cap = Number(req.body?.salaryCap ?? ROSTERS[CURRENT_SPORT]?.cap ?? 50000);
   const roster = ROSTERS[CURRENT_SPORT] || ROSTERS.NFL;
   const pool = PLAYERS.filter(p => (p.sport || CURRENT_SPORT) === CURRENT_SPORT);
   if (!pool.length) return res.json({ error:"No players loaded" });
-  const one = buildLineup(pool, roster, { salaryCap: cap, noise: 1.0, temperature: 0.6, maxPerTeam: roster.defaultMaxPerTeam, minTries: 300 });
+  const one = buildLineupStrict(pool, roster, { salaryCap: cap, noise: 1.0, temperature: 0.6, maxPerTeam: roster.defaultMaxPerTeam, tries: 300 });
   res.json(one || { error:"Could not build a lineup. Check player pool." });
 });
 
-// Admin: refresh nflverse (NFL only)
+// Admin: refresh NFL from nflverse
 app.post("/api/admin/refresh", async (req,res)=>{
   const token = req.headers["x-admin-token"] || req.query.token || "";
   if (token !== ADMIN_TOKEN) return res.status(401).json({ error:"Unauthorized" });
-  try{
+  try {
     const info = await refreshNflverse();
     res.json({ ok:true, ...info });
-  }catch(e){
+  } catch(e){
     res.status(500).json({ error:String(e.message||e) });
   }
 });
 
-// Admin: DK loader (CSV or URL) — auto-detect sport
+// Admin: DK loader (CSV or URL) — auto sport detect
 app.post("/api/admin/dk", async (req,res)=>{
   const token = req.headers["x-admin-token"] || "";
   if (token !== ADMIN_TOKEN) return res.status(401).json({ error:"Unauthorized" });
@@ -550,7 +535,7 @@ app.post("/api/admin/dk", async (req,res)=>{
   const rawCsv = trim(req.body?.csv || "");
   const url    = trim(req.body?.url || "");
 
-  try{
+  try {
     if (rawCsv) {
       const { players, sport } = parseDKCsvToPlayers(rawCsv);
       if (!players.length) throw new Error("No players in CSV");
@@ -558,19 +543,19 @@ app.post("/api/admin/dk", async (req,res)=>{
       CURRENT_SPORT = sport;
       LAST_REFRESH = new Date().toISOString();
       LAST_SOURCE  = "draftkings";
-      return res.json({ ok:true, count: PLAYERS.length, source: LAST_SOURCE, sport: CURRENT_SPORT });
+      return res.json({ ok:true, count: PLAYERS.length, sport, source: LAST_SOURCE });
     }
     if (url) {
       const info = await loadDKFromUrl(url);
       return res.json(info);
     }
     return res.status(400).json({ error:"Provide either { csv } or { url }" });
-  }catch(e){
+  } catch(e){
     res.status(500).json({ error:String(e.message||e) });
   }
 });
 
-// ---------- Start ----------
+// ----------------- Start -----------------
 app.listen(PORT, "0.0.0.0", ()=>{
   console.log(`Fantasy backend running on port ${PORT}`);
 });
