@@ -1,12 +1,8 @@
 // backend/server.js
-// Fantasy Sim backend — NFL + NBA, DK CSV upload/URL, nflverse fallback (NFL),
-// stochastic multi-lineup generator with strict slot filling (no 2 QBs).
-//
-// ENV:
-//   PORT
-//   ADMIN_TOKEN            (default "Truetrenddfs4u!")
-//   CORS_ORIGIN            (default "*")
-//   DK_SALARIES_URL        (optional public CSV to auto-load on boot)
+// Fantasy Sim Backend – NFL + NBA
+// DK CSV upload/URL + nflverse fallback (NFL)
+// Stochastic multi-lineup generator with strict slot filling
+// Injury filtering (OUT/IR/Q/DNP/PUP/INACTIVE/SUSP/RES)
 
 const express = require("express");
 const cors = require("cors");
@@ -16,7 +12,7 @@ const Papa = require("papaparse");
 const PORT            = process.env.PORT || 5000;
 const ADMIN_TOKEN     = process.env.ADMIN_TOKEN || "Truetrenddfs4u!";
 const CORS_ORIGIN     = process.env.CORS_ORIGIN || "*";
-const DK_SALARIES_URL = process.env.DK_SALARIES_URL || "";
+const DK_SALARIES_URL = process.env.DK_SALARIES_URL || "";   // optional public CSV URL
 const REFRESH_MS      = 6 * 60 * 60 * 1000; // 6 hours
 
 // ----------------- App --------------------
@@ -59,7 +55,6 @@ const ROSTERS = {
       { name: "FLEX", allow: ["RB", "WR", "TE"] },
       { name: "DST",  allow: ["DST"] },
     ],
-    // Optional constraints
     stack: { needQBStack: true, minReceivers: 1, maxReceivers: 2 },
     avoidDstConflict: true,
     defaultMaxPerTeam: 3,
@@ -92,6 +87,18 @@ function detectSportFromPositions(posSet) {
   return "NFL";
 }
 
+// Injury filter terms (upper-case checks)
+const INJURY_TERMS = ["OUT", "IR", "Q", "DNP", "PUP", "SUSP", "RES", "INACTIVE"];
+
+function isInjuredDK(row, nameUpper) {
+  const status = (row.InjuryStatus || row.Status || "").toUpperCase();
+  const note   = (row.InjuryNotes || row.Note || "").toUpperCase();
+
+  const tagHit = INJURY_TERMS.some(t => status.includes(t) || note.includes(t));
+  const nameHit = nameUpper.includes("(IR)") || nameUpper.includes("(OUT)") || nameUpper.includes("(Q)");
+  return tagHit || nameHit;
+}
+
 function parseDKCsvToPlayers(csvText) {
   const parsed = Papa.parse(csvText, { header: true, skipEmptyLines: true });
   const rows = parsed.data || [];
@@ -109,6 +116,9 @@ function parseDKCsvToPlayers(csvText) {
     const team = trim(r.TeamAbbrev || r.Team || r["Team Abbrev"] || "");
     const salary = n(r.Salary || r["DK Salary"] || r["Salary (DK)"]);
     const proj = n(r.AvgPointsPerGame || r["Avg Points/GM"] || r.Projection || r.Proj || r.FPPG);
+
+    // --- Injury filtering ---
+    if (isInjuredDK(r, name.toUpperCase())) continue;
 
     if (!name || !primary || !salary) continue;
 
@@ -135,7 +145,9 @@ function parseDKCsvToPlayers(csvText) {
       if (p.pos === "DST") p.name = `${p.team || p.name} D/ST`;
     }
   }
-  return { players: list.map(p => ({ ...p, sport })), sport };
+
+  console.log(`✅ Loaded ${list.length} active ${sport} players (injured filtered out)`);
+  return { players: list.map(p=>({ ...p, sport })), sport };
 }
 
 async function loadDKFromUrl(url) {
@@ -332,8 +344,6 @@ function buildLineupStrict(players, rosterCfg, {
   tries = 300
 } = {}){
   const cap = salaryCap || rosterCfg.cap;
-
-  // Precompute jittered projections once per attempt batch for stability
   let best = null;
 
   for(let attempt=0; attempt<tries; attempt++){
@@ -383,8 +393,8 @@ function buildLineupStrict(players, rosterCfg, {
       cands = cands.slice(0, K);
 
       const pick = cands.find(p => canAdd(p, allowed.length===1 ? allowed[0] : p.pos));
-      if (!pick) { // fail this attempt
-        // try a bit more: widen to top 25%
+      if (!pick) {
+        // widen to top 25%
         let more = [];
         for (const pos of allowed) {
           if (poolByPos[pos]) more = more.concat(poolByPos[pos].filter(x=>!taken.has(x.id)));
@@ -527,7 +537,7 @@ app.post("/api/admin/refresh", async (req,res)=>{
   }
 });
 
-// Admin: DK loader (CSV or URL) — auto sport detect
+// Admin: DK loader (CSV or URL) — auto sport detect, injury-filter aware
 app.post("/api/admin/dk", async (req,res)=>{
   const token = req.headers["x-admin-token"] || "";
   if (token !== ADMIN_TOKEN) return res.status(401).json({ error:"Unauthorized" });
